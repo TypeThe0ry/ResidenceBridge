@@ -1,0 +1,29 @@
+server-id: "survival-1"
+
+mysql:
+  host: "127.0.0.1"
+  port: 3306
+  database: "minecraft"
+  username: "root"
+  password: "password"
+  maximum-pool-size: 10
+
+sync:
+  initial-delay-ticks: 40
+  interval-seconds: 60
+  log-success: false
+
+teleport:
+  pending-expire-seconds: 30
+  join-delay-ticks: 40
+
+velocity:
+  channel: "residencebridge:main"
+  fallback-bungee-channel: true
+
+messages:
+  duplicate: "&c全服已存在同名领地：&f%name%"
+  not-found: "&c没有找到这个领地：&f%name%"
+  switching: "&a正在传送到领地所在服务器：&f%server%"
+  local-teleport-failed: "&c本服领地传送失败，请联系管理员。"
+  connect-request-failed: "&c跨服传送请求失败，请稍后再试。"

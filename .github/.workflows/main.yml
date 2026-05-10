@@ -1,0 +1,45 @@
+name: build
+on:
+  push:
+    branches:
+      - master
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v2
+      - name: validate gradle wrapper
+        uses: gradle/wrapper-validation-action@v1
+      - name: setup jdk 8.0
+        uses: actions/setup-java@v2
+        with:
+          distribution: adopt
+          java-version: 8.0
+      - name: make gradle wrapper executable
+        run: chmod +x ./gradlew
+      # 第一次构建
+      - name: build
+        id: build_1
+        run: ./gradlew build
+      # 第二次构建
+      - name: build (retry 1)
+        id: build_2
+        if: steps.build_1.outcome == 'failure'
+        run: ./gradlew build
+      # 第三次构建
+      - name: build (retry 2)
+        id: build_3
+        if: steps.build_2.outcome == 'failure'
+        run: ./gradlew build
+      # 第四次构建
+      - name: build (retry 3)
+        id: build_4
+        if: steps.build_3.outcome == 'failure'
+        run: ./gradlew build
+      # 上传构建文件
+      - name: capture build artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: Artifacts
+          path: build/libs/
