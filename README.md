@@ -7,17 +7,26 @@
 [![Java](https://img.shields.io/badge/Java-8%2B-orange.svg)](https://adoptium.net)
 [![Minecraft](https://img.shields.io/badge/Minecraft-1.16%2B-brightgreen.svg)](https://papermc.io)
 
+> **本插件（子服端）需要配合 👉 [ResidenceBridge-Velocity](https://github.com/hahaTT0902/ResidenceBridge-Velocity) 代理端插件才能完整运行跨服功能。**
+
 ## 简介
 
 ResidenceBridge 是一款 Bukkit/Paper 服务端插件，专为在 **Velocity / BungeeCord** 代理网络中运行多个子服的 Minecraft 服务器设计。
 
-它通过共享的 **MySQL 数据库** 维护一张全局领地索引表，实现：
+它由两个部分组成，需要**同时部署**：
+
+| 组件 | 部署位置 | 仓库 |
+|------|---------|------|
+| **ResidenceBridge**（本仓库） | 每台 Bukkit/Paper 子服 | 当前页面 |
+| **[ResidenceBridge-Velocity](https://github.com/hahaTT0902/ResidenceBridge-Velocity)** | Velocity 代理端 | 点击链接 |
+
+两者通过共享的 **MySQL 数据库** 协作，实现：
 
 - **全服唯一领地名** —— 任意子服创建/重命名领地时自动校验全网是否重名
 - **跨服领地传送** —— 在任意子服执行 `/res tp <名称>` 可自动切换至领地所在服务器并完成传送
 - **实时数据同步** —— 各子服按配置间隔将本服领地数据同步至 MySQL
 
-> 无需在代理端安装任何插件，ResidenceBridge 仅部署在各子服。
+> ⚠️ **仅安装子服插件而不安装 Velocity 端插件时，跨服切换功能将无法正常工作。**
 
 ---
 
@@ -36,23 +45,33 @@ ResidenceBridge 是一款 Bukkit/Paper 服务端插件，专为在 **Velocity / 
 
 ## 环境要求
 
-| 组件 | 版本要求 |
-|------|---------|
-| Minecraft 服务端 | Paper / Spigot **1.16+**（推荐 1.20.x） |
-| [Residence](https://www.spigotmc.org/resources/residence.11480/) | 最新稳定版，安装在各子服 |
-| 代理端 | Velocity 3.x 或 BungeeCord（需开启插件消息转发） |
-| 数据库 | MySQL **5.7+** 或 MariaDB **10.4+** |
-| Java | **8+** |
+| 组件 | 部署位置 | 版本要求 |
+|------|---------|----------|
+| Minecraft 服务端 | 各子服 | Paper / Spigot **1.16+**（推荐 1.20.x） |
+| [Residence](https://www.spigotmc.org/resources/residence.11480/) | 各子服 | 最新稳定版 |
+| **ResidenceBridge**（本插件） | 各子服 | 与本仓库 Release 一致 |
+| **[ResidenceBridge-Velocity](https://github.com/hahaTT0902/ResidenceBridge-Velocity)** | **Velocity 代理端** ⚠️ | 与本插件配套版本 |
+| 数据库 | 独立服务器 | MySQL **5.7+** 或 MariaDB **10.4+** |
+| Java | — | **8+** |
 
 ---
 
 ## 安装步骤
 
-1. 下载最新版 `ResidenceBridge-x.x.x.jar`，放入每台**子服**的 `plugins/` 目录。
-2. 确保每台子服已安装 **Residence** 插件。
-3. 启动子服，插件会在 `plugins/ResidenceBridge/config.yml` 生成默认配置文件。
-4. 编辑 `config.yml`，填写 MySQL 连接信息，并为每台子服设置**唯一**的 `server-id`。
-5. 重启服务器，或执行 `/rb reload` 重载配置。
+### 第一步：部署 Velocity 端插件（必须）
+
+1. 前往 [ResidenceBridge-Velocity](https://github.com/hahaTT0902/ResidenceBridge-Velocity) 下载最新版 jar。
+2. 将其放入 Velocity 代理端的 `plugins/` 目录。
+3. 启动 Velocity，按照该插件的说明配置好 MySQL 连接和频道名称。
+
+### 第二步：部署各子服插件
+
+4. 下载最新版 `ResidenceBridge-x.x.x.jar`，放入每台**子服**的 `plugins/` 目录。
+5. 确保每台子服已安装 **Residence** 插件。
+6. 启动子服，插件会在 `plugins/ResidenceBridge/config.yml` 生成默认配置文件。
+7. 编辑 `config.yml`，填写与 Velocity 端**相同的** MySQL 信息，并为每台子服设置**唯一**的 `server-id`。
+8. 确保 `velocity.channel` 的值与 Velocity 端插件配置的频道名称**完全一致**。
+9. 重启服务器，或执行 `/rb reload` 重载配置。
 
 ---
 
@@ -147,7 +166,10 @@ messages:
         │
         └── 外服领地 ──► 写入 pending_tp 记录
                               │
-                    发送插件消息，切换玩家至目标服
+                    子服发送插件消息至 Velocity 代理
+                              │
+                 ResidenceBridge-Velocity 接收消息
+                    并将玩家切换至目标子服
                               │
                     玩家加入目标服时读取 pending_tp
                               │
