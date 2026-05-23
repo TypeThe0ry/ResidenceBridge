@@ -4,11 +4,11 @@
 
 > Cross-server residence bridge plugin for sharing [Residence](https://www.spigotmc.org/resources/residence.11480/) data seamlessly across a Velocity / BungeeCord network
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/TypeThe0ry0902/ResidenceBridge/releases)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/TypeThe0ry/ResidenceBridge/releases)
 [![Java](https://img.shields.io/badge/Java-8%2B-orange.svg)](https://adoptium.net)
 [![Minecraft](https://img.shields.io/badge/Minecraft-1.16%2B-brightgreen.svg)](https://papermc.io)
 
-> **This plugin (sub-server side) must be used together with the proxy plugin: [ResidenceBridge-Velocity](https://github.com/TypeThe0ry0902/ResidenceBridge-Velocity). Cross-server features will not work correctly without it.**
+> **This plugin (sub-server side) must be used together with the proxy plugin: [ResidenceBridge-Velocity](https://github.com/TypeThe0ry/ResidenceBridge-Velocity). Cross-server features will not work correctly without it.**
 
 ## Overview
 
@@ -23,7 +23,7 @@ The solution has two parts and **both must be deployed**:
 | Component | Deploy To |
 |------|---------|
 | **ResidenceBridge** (this repository) | Every Bukkit/Paper sub-server |
-| **[ResidenceBridge-Velocity](https://github.com/TypeThe0ry0902/ResidenceBridge-Velocity)** | Velocity proxy |
+| **[ResidenceBridge-Velocity](https://github.com/TypeThe0ry/ResidenceBridge-Velocity)** | Velocity proxy |
 
 Both parts work together through a shared **MySQL database** to provide:
 
@@ -53,7 +53,7 @@ Both parts work together through a shared **MySQL database** to provide:
 | Minecraft server | Each sub-server | Paper / Spigot **1.16+** (recommended: 1.20.x) |
 | [Residence](https://www.spigotmc.org/resources/residence.11480/) | Each sub-server | Latest stable release |
 | **ResidenceBridge** | Each sub-server | Same version as this repository release |
-| **[ResidenceBridge-Velocity](https://github.com/TypeThe0ry0902/ResidenceBridge-Velocity)** | **Velocity proxy** | Matching version for this plugin |
+| **[ResidenceBridge-Velocity](https://github.com/TypeThe0ry/ResidenceBridge-Velocity)** | **Velocity proxy** | Matching version for this plugin |
 | Database | Separate server | MySQL **5.7+** or MariaDB **10.4+** |
 | Java | — | **8+** |
 
@@ -63,7 +63,7 @@ Both parts work together through a shared **MySQL database** to provide:
 
 ### Step 1: Install the proxy plugin (required)
 
-1. Download the latest jar from [ResidenceBridge-Velocity](https://github.com/TypeThe0ry0902/ResidenceBridge-Velocity).
+1. Download the latest jar from [ResidenceBridge-Velocity](https://github.com/TypeThe0ry/ResidenceBridge-Velocity).
 2. Put it into the `plugins/` directory of your Velocity proxy.
 3. Start Velocity and configure the MySQL connection and channel name according to that repository.
 
