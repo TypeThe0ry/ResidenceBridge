@@ -1,0 +1,55 @@
+# =====================================================
+#  ResidenceBridge 配置文件
+#  GitHub: https://github.com/TypeThe0ry/ResidenceBridge
+# =====================================================
+
+# 当前子服的唯一标识符
+# 不同子服必须配置不同的值，建议使用小写字母、数字和连字符
+# 例如：survival-1、creative、skyblock
+server-id: "survival-1"
+
+# ─── MySQL 数据库 ──────────────────────────────────
+mysql:
+  host: "127.0.0.1"
+  port: 3306
+  database: "minecraft"
+  username: "root"
+  password: "password"
+  # HikariCP 连接池最大连接数，一般 5-10 即可
+  maximum-pool-size: 10
+
+# ─── 领地数据同步 ─────────────────────────────────
+sync:
+  # 服务器启动后延迟多少 tick 开始首次同步（20 tick = 1 秒）
+  # 适当延迟可等待 Residence 插件加载完毕
+  initial-delay-ticks: 40
+  # 每隔多少秒将本服领地数据同步至 MySQL
+  interval-seconds: 60
+  # 每次同步成功后是否在控制台输出日志（调试时可开启）
+  log-success: false
+
+# ─── 跨服传送 ────────────────────────────────────
+teleport:
+  # 跨服传送请求的有效期（秒）
+  # 玩家必须在此时间内成功进入目标服，否则传送请求失效
+  pending-expire-seconds: 30
+  # 玩家进入目标服后延迟多少 tick 再执行传送
+  # 建议保留此延迟，确保 Residence 数据加载完成后再传送
+  join-delay-ticks: 40
+
+# ─── Velocity / BungeeCord 消息频道 ──────────────
+velocity:
+  # Velocity 插件消息频道名称（需与代理端配置一致）
+  channel: "residencebridge:main"
+  # 是否同时发送 BungeeCord 格式的连接消息
+  # 使用 BungeeCord 代理时请保持 true；纯 Velocity 环境可设为 false
+  fallback-bungee-channel: true
+
+# ─── 玩家提示消息 ────────────────────────────────
+# 支持 & 颜色代码，可用占位符：%name%（领地名）、%server%（服务器名）
+messages:
+  duplicate: "&c全服已存在同名领地：&f%name%"
+  not-found: "&c没有找到这个领地：&f%name%"
+  switching: "&a正在传送到领地所在服务器：&f%server%"
+  local-teleport-failed: "&c本服领地传送失败，请联系管理员。"
+  connect-request-failed: "&c跨服传送请求失败，请稍后再试。"
