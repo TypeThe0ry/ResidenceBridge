@@ -5,18 +5,17 @@
 > Cross-server Residence bridge for sharing [Residence](https://www.spigotmc.org/resources/residence.11480/) data, teleport requests, and global limits across a Velocity / BungeeCord network.
 
 [![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](https://github.com/TypeThe0ry0902/ResidenceBridge/releases)
-[![Server Java](https://img.shields.io/badge/Server-Java%208%2B-orange.svg)](https://adoptium.net)
-[![Velocity Java](https://img.shields.io/badge/Velocity-Java%2017%2B-orange.svg)](https://adoptium.net)
+[![Java](https://img.shields.io/badge/Server-Java%208%2B-orange.svg)](https://adoptium.net)
 [![Minecraft](https://img.shields.io/badge/Minecraft-1.16%2B-brightgreen.svg)](https://papermc.io)
 
 ## Repository Layout
 
 Since 1.2.0, the sub-server plugin and Velocity proxy plugin live in the same repository. Releases build both jars, and both must be deployed.
 
-| Directory | Artifact | Deploy To | Java |
+| Directory | Artifact | Deploy To |
 |-----------|----------|-----------|------|
-| [Server](Server) | `ResidenceBridge-1.2.0.jar` | Every Bukkit/Paper/Folia sub-server | 8+ |
-| [Velocity](Velocity) | `ResidenceBridge-Velocity-1.2.0.jar` | Velocity proxy | 17+ |
+| [Server](Server) | `ResidenceBridge-1.2.0.jar` | Every Bukkit/Paper/Folia sub-server |
+| [Velocity](Velocity) | `ResidenceBridge-Velocity-1.2.0.jar` | Velocity proxy |
 
 Installing only one side is not enough for cross-server features.
 
