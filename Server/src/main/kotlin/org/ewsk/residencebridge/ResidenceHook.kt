@@ -33,18 +33,48 @@ object ResidenceHook {
 
     fun allSnapshots(): List<ResidenceSnapshot> {
         return try {
-            residenceObjects().mapNotNull { toSnapshot(it) }
+            residenceCandidates().mapNotNull { toSnapshot(it.residence, it.nameHint) }
         } catch (_: Throwable) {
             emptyList()
         }
     }
 
     fun toSnapshot(name: String): ResidenceSnapshot? {
-        return getResidence(name)?.let { toSnapshot(it) }
+        return getResidence(name)?.let { toSnapshot(it, name) }
     }
 
-    private fun toSnapshot(residence: Any): ResidenceSnapshot? {
-        val name = residence.residenceName() ?: return null
+    fun diagnostics(): List<String> {
+        val lines = mutableListOf<String>()
+        val plugin = Bukkit.getPluginManager().getPlugin("Residence")
+        lines += "Residence plugin: ${plugin?.description?.fullName ?: "not found"}"
+        val clazz = tryLoadResidenceClass()
+        lines += "Residence class: ${clazz?.name ?: "not found"}"
+        val instance = residenceInstance()
+        lines += "Residence instance: ${instance?.javaClass?.name ?: "null"}"
+        val manager = residenceManager()
+        lines += "Residence manager: ${manager?.javaClass?.name ?: "null"}"
+        if (manager != null) {
+            lines += "Manager res-like methods: " + manager.javaClass.allMethods()
+                .filter { it.parameterTypes.isEmpty() && it.name.lowercase().contains("res") }
+                .take(12)
+                .joinToString { "${it.name}:${it.returnType.simpleName}" }
+            lines += "Manager res-like fields: " + manager.javaClass.allFields()
+                .filter { it.name.lowercase().contains("res") }
+                .take(12)
+                .joinToString { "${it.name}:${it.type.simpleName}" }
+        }
+        val candidates = residenceCandidates()
+        lines += "Residence candidates: ${candidates.size}"
+        candidates.take(10).forEachIndexed { index, candidate ->
+            lines += "#$index hint=${candidate.nameHint ?: "null"}, class=${candidate.residence.javaClass.name}, name=${candidate.residence.residenceName() ?: "null"}, owner=${candidate.residence.ownerName() ?: "null"}, world=${candidate.residence.worldName() ?: "null"}"
+        }
+        val snapshots = allSnapshots()
+        lines += "Snapshots: ${snapshots.size} ${snapshots.joinToString { it.name }}"
+        return lines
+    }
+
+    private fun toSnapshot(residence: Any, nameHint: String? = null): ResidenceSnapshot? {
+        val name = residence.residenceName() ?: nameHint?.takeIf { it.isNotBlank() } ?: return null
         return ResidenceSnapshot(
             name = name,
             ownerUuid = residence.ownerUuid(),
@@ -72,15 +102,19 @@ object ResidenceHook {
                     method.invoke(manager, name)
                 }.getOrNull()
             }
+            ?: residenceCandidates().firstOrNull { candidate ->
+                val candidateName = candidate.residence.residenceName() ?: candidate.nameHint
+                candidateName != null && key(candidateName) == key(name)
+            }?.residence
     }
 
-    private fun residenceObjects(): Collection<Any> {
+    private fun residenceCandidates(): Collection<ResidenceCandidate> {
         val manager = residenceManager() ?: return emptyList()
 
         val preferred = manager.value("getResidences", "residences", "getResidenceList", "residenceList")
-        val preferredObjects = preferred.toResidenceCollection()
-        if (preferredObjects.isNotEmpty()) {
-            return preferredObjects
+        val preferredCandidates = preferred.toResidenceCandidates()
+        if (preferredCandidates.isNotEmpty()) {
+            return preferredCandidates
         }
 
         manager.javaClass.allMethods()
@@ -91,9 +125,9 @@ object ResidenceHook {
                     method.isAccessible = true
                     method.invoke(manager)
                 }.getOrNull()
-                val objects = value.toResidenceCollection()
-                if (objects.isNotEmpty()) {
-                    return objects
+                val candidates = value.toResidenceCandidates()
+                if (candidates.isNotEmpty()) {
+                    return candidates
                 }
             }
 
@@ -104,9 +138,9 @@ object ResidenceHook {
                     field.isAccessible = true
                     field.get(manager)
                 }.getOrNull()
-                val objects = value.toResidenceCollection()
-                if (objects.isNotEmpty()) {
-                    return objects
+                val candidates = value.toResidenceCandidates()
+                if (candidates.isNotEmpty()) {
+                    return candidates
                 }
             }
 
@@ -193,14 +227,20 @@ object ResidenceHook {
         }.getOrNull()
     }
 
-    private fun Any?.toResidenceCollection(): Collection<Any> {
+    private fun Any?.toResidenceCandidates(): Collection<ResidenceCandidate> {
         return when (this) {
-            is Map<*, *> -> values.filterNotNull().filter { it.looksLikeResidence() }
-            is Collection<*> -> filterNotNull().filter { it.looksLikeResidence() }
-            is Array<*> -> filterNotNull().filter { it.looksLikeResidence() }
+            is Map<*, *> -> entries.mapNotNull { entry ->
+                val residence = entry.value ?: return@mapNotNull null
+                val nameHint = entry.key?.toString()?.takeIf { it.isNotBlank() }
+                if (residence.looksLikeResidence() || nameHint != null) ResidenceCandidate(nameHint, residence) else null
+            }
+            is Collection<*> -> filterNotNull().filter { it.looksLikeResidence() }.map { ResidenceCandidate(null, it) }
+            is Array<*> -> filterNotNull().filter { it.looksLikeResidence() }.map { ResidenceCandidate(null, it) }
             else -> emptyList()
         }
     }
+
+    private data class ResidenceCandidate(val nameHint: String?, val residence: Any)
 
     private fun Any.looksLikeResidence(): Boolean {
         val className = javaClass.name.lowercase()

@@ -39,4 +39,11 @@ object ResidenceBridgeCommand {
             }
         }
     }
+
+    @CommandBody(permission = "residencebridge.command.debug", permissionDefault = PermissionDefault.OP)
+    val debug = subCommand {
+        execute<ProxyCommandSender> { sender, _, _ ->
+            ResidenceHook.diagnostics().forEach { sender.sendMessage(it) }
+        }
+    }
 }
