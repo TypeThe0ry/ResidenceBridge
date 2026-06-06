@@ -45,6 +45,24 @@ object BridgePlugin {
         start()
     }
 
+    fun syncNow(callback: (Int, Throwable?) -> Unit) {
+        if (!::database.isInitialized) {
+            callback(0, IllegalStateException("ResidenceBridge database is not initialized."))
+            return
+        }
+        BridgeScheduler.runGlobal {
+            val snapshots = ResidenceHook.allSnapshots()
+            runAsync {
+                try {
+                    database.syncServerSnapshots(snapshots)
+                    callback(snapshots.size, null)
+                } catch (t: Throwable) {
+                    callback(0, t)
+                }
+            }
+        }
+    }
+
     private fun start() {
         BridgeScheduler.init(plugin)
         config = BridgeConfig.load(plugin.config)
@@ -215,6 +233,23 @@ object BridgePlugin {
         val player = event.player
         val residenceName = name ?: return
         event.isCancelled = true
+        val localSnapshot = ResidenceHook.toSnapshot(residenceName)
+        if (localSnapshot != null) {
+            startTeleport(
+                player,
+                ResidenceIndexEntry(
+                    nameKey = localSnapshot.nameKey,
+                    displayName = localSnapshot.name,
+                    serverId = config.serverId,
+                    worldName = localSnapshot.worldName,
+                    ownerUuid = localSnapshot.ownerUuid,
+                    ownerName = localSnapshot.ownerName,
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+            runAsync { database.upsertSnapshot(localSnapshot) }
+            return
+        }
         runAsync {
             val entry = database.findIndex(residenceName)
             if (entry == null) {
@@ -417,7 +452,7 @@ object BridgePlugin {
             runAsync {
                 try {
                     database.syncServerSnapshots(snapshots)
-                    if (config.syncLogSuccess) {
+                    if (config.syncLogSuccess || snapshots.isEmpty()) {
                         info("Synced ${snapshots.size} residences for ${config.serverId}.")
                     }
                 } catch (t: Throwable) {
@@ -437,7 +472,6 @@ object BridgePlugin {
                 block()
             } catch (t: Throwable) {
                 warning("Player task failed: ${t.message}")
-                t.printStackTrace()
             }
         }
     }

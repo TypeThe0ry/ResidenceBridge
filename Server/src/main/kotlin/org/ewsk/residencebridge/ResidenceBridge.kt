@@ -27,7 +27,6 @@ object ResidenceBridge : Plugin() {
             info("ResidenceBridge enabled.")
         } catch (t: Throwable) {
             warning("ResidenceBridge failed to enable: ${t.message}")
-            t.printStackTrace()
         }
     }
 

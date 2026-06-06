@@ -22,7 +22,20 @@ object ResidenceBridgeCommand {
                 sender.sendMessage("ResidenceBridge reloaded.")
             } catch (t: Throwable) {
                 sender.sendMessage("ResidenceBridge reload failed: ${t.message}")
-                t.printStackTrace()
+            }
+        }
+    }
+
+    @CommandBody(permission = "residencebridge.command.sync", permissionDefault = PermissionDefault.OP)
+    val sync = subCommand {
+        execute<ProxyCommandSender> { sender, _, _ ->
+            sender.sendMessage("ResidenceBridge sync started.")
+            BridgePlugin.syncNow { count, error ->
+                if (error == null) {
+                    sender.sendMessage("ResidenceBridge synced $count residences.")
+                } else {
+                    sender.sendMessage("ResidenceBridge sync failed: ${error.message}")
+                }
             }
         }
     }

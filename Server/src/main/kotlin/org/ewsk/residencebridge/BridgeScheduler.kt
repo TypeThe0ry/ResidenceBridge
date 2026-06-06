@@ -49,7 +49,6 @@ object BridgeScheduler {
                 block()
             } catch (t: Throwable) {
                 warning("Async task failed: ${t.message}")
-                t.printStackTrace()
             }
         }
     }
