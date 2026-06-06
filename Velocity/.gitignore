@@ -1,0 +1,26 @@
+# Build outputs
+build/
+bin/
+out/
+
+# Gradle
+.gradle/
+
+# Kotlin
+.kotlin/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+
+# VS Code
+.vscode/
+
+# AI tooling
+.claude/
+.claude.local.md
+.cursor/
+
+# OS files
+.DS_Store
+Thumbs.db
