@@ -6,10 +6,20 @@ data class ResidenceSnapshot(
     val name: String,
     val ownerUuid: UUID?,
     val ownerName: String?,
-    val worldName: String?
+    val worldName: String?,
+    val teleportLocation: BridgeLocation? = null
 ) {
     val nameKey: String = key(name)
 }
+
+data class BridgeLocation(
+    val worldName: String,
+    val x: Double,
+    val y: Double,
+    val z: Double,
+    val yaw: Float = 0f,
+    val pitch: Float = 0f
+)
 
 data class ResidenceIndexEntry(
     val nameKey: String,
@@ -18,7 +28,8 @@ data class ResidenceIndexEntry(
     val worldName: String?,
     val ownerUuid: UUID?,
     val ownerName: String?,
-    val updatedAt: Long
+    val updatedAt: Long,
+    val teleportLocation: BridgeLocation? = null
 )
 
 data class PendingTeleport(

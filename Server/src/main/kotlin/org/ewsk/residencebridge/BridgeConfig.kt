@@ -37,11 +37,16 @@ data class BridgeConfig(
                 syncIntervalSeconds = config.getLong("sync.interval-seconds", 60L),
                 syncLogSuccess = config.getBoolean("sync.log-success", false),
                 pendingExpireSeconds = config.getLong("teleport.pending-expire-seconds", 30L),
-                joinDelayTicks = config.getLong("teleport.join-delay-ticks", 40L),
+                joinDelayTicks = config.getLong("teleport.join-delay-ticks", 0L),
                 teleportWait = TeleportWaitConfig(
+                    enabled = config.getBoolean("teleport.wait.enabled", true),
                     defaultSeconds = config.getInt("teleport.wait.default-seconds", 3),
+                    bypassPermission = config.getString("teleport.wait.bypass-permission", "residencebridge.teleport.bypass")!!,
                     cancelOnMove = config.getBoolean("teleport.wait.cancel-on-move", true),
                     cancelOnDamage = config.getBoolean("teleport.wait.cancel-on-damage", true),
+                    countdownSound = config.getString("teleport.wait.countdown-sound", "BLOCK_NOTE_BLOCK_PLING")!!,
+                    countdownSoundVolume = config.getDouble("teleport.wait.countdown-sound-volume", 1.0).toFloat(),
+                    countdownSoundPitch = config.getDouble("teleport.wait.countdown-sound-pitch", 1.2).toFloat(),
                     rules = config.permissionIntRules("teleport.wait.groups", "seconds")
                 ),
                 limits = ResidenceLimitConfig(
@@ -51,7 +56,9 @@ data class BridgeConfig(
                 ),
                 list = ListConfig(
                     pageSize = config.getInt("list.page-size", 8).coerceAtLeast(1),
+                    othersPermission = config.getString("list.others-permission", "residencebridge.list.others")!!,
                     header = config.message("list.header", "&6你的全区领地列表 &7(&f%count%&7) &8- &7第 &f%page%&7/&f%max_page% &7页"),
+                    otherHeader = config.message("list.other-header", "&6%target% 的全区领地列表 &7(&f%count%&7) &8- &7第 &f%page%&7/&f%max_page% &7页"),
                     line = config.message("list.line", "&7- &a%name% &8[&f%server%&8]"),
                     empty = config.message("list.empty", "&e你还没有任何领地。")
                 ),
@@ -66,7 +73,7 @@ data class BridgeConfig(
                     duplicate = config.message("messages.duplicate", "&c全服已存在同名领地：&f%name%"),
                     notFound = config.message("messages.not-found", "&c没有找到这个领地：&f%name%"),
                     switching = config.message("messages.switching", "&a正在传送到领地所在服务器：&f%server%"),
-                    localTeleportFailed = config.message("messages.local-teleport-failed", "&c本服领地传送失败，请联系管理员。"),
+                    localTeleportFailed = config.message("messages.local-teleport-failed", "&c你没有权限执行这个操作。"),
                     connectRequestFailed = config.message("messages.connect-request-failed", "&c跨服传送请求失败，请稍后再试。"),
                     limitReached = config.message("messages.limit-reached", "&c你的全区领地数量已达上限：&f%count%/%max%"),
                     teleportWait = config.message("messages.teleport-wait", "&a传送将在 &f%seconds% &a秒后开始，请不要移动。"),
@@ -108,12 +115,20 @@ data class PermissionIntRule(
 )
 
 data class TeleportWaitConfig(
+    val enabled: Boolean,
     val defaultSeconds: Int,
+    val bypassPermission: String,
     val cancelOnMove: Boolean,
     val cancelOnDamage: Boolean,
+    val countdownSound: String,
+    val countdownSoundVolume: Float,
+    val countdownSoundPitch: Float,
     val rules: List<PermissionIntRule>
 ) {
     fun secondsFor(player: Player): Int {
+        if (!enabled || player.isOp || player.hasPermission(bypassPermission) || player.hasPermission("residencebridge.admin")) {
+            return 0
+        }
         val values = rules.filter { player.hasPermission(it.permission) }.map { it.value }
         return (values.minOrNull() ?: defaultSeconds).coerceAtLeast(0)
     }
@@ -135,7 +150,9 @@ data class ResidenceLimitConfig(
 
 data class ListConfig(
     val pageSize: Int,
+    val othersPermission: String,
     val header: String,
+    val otherHeader: String,
     val line: String,
     val empty: String
 )

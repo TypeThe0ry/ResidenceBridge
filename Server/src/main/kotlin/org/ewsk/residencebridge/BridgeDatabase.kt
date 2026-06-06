@@ -10,6 +10,10 @@ import kotlin.math.max
 
 class BridgeDatabase(private val config: BridgeConfig) {
 
+    private companion object {
+        private const val ACTIVE_PRUNE_GRACE_MILLIS = 5 * 60 * 1000L
+    }
+
     private val dataSource: HikariDataSource
 
     init {
@@ -32,14 +36,26 @@ class BridgeDatabase(private val config: BridgeConfig) {
                   display_name VARCHAR(128) NOT NULL,
                   server_id VARCHAR(64) NOT NULL,
                   world VARCHAR(64),
+                tp_world VARCHAR(64),
+                tp_x DOUBLE,
+                tp_y DOUBLE,
+                tp_z DOUBLE,
+                tp_yaw FLOAT,
+                tp_pitch FLOAT,
                   owner_uuid VARCHAR(36),
                   owner_name VARCHAR(32),
-                                    status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
+                status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
                   updated_at BIGINT NOT NULL
                 )
                 """.trimIndent()
             )
-                        ensureColumn(conn, "residence_bridge_index", "status", "VARCHAR(16) NOT NULL DEFAULT 'ACTIVE'")
+            ensureColumn(conn, "residence_bridge_index", "status", "VARCHAR(16) NOT NULL DEFAULT 'ACTIVE'")
+            ensureColumn(conn, "residence_bridge_index", "tp_world", "VARCHAR(64)")
+            ensureColumn(conn, "residence_bridge_index", "tp_x", "DOUBLE")
+            ensureColumn(conn, "residence_bridge_index", "tp_y", "DOUBLE")
+            ensureColumn(conn, "residence_bridge_index", "tp_z", "DOUBLE")
+            ensureColumn(conn, "residence_bridge_index", "tp_yaw", "FLOAT")
+            ensureColumn(conn, "residence_bridge_index", "tp_pitch", "FLOAT")
             st.executeUpdate(
                 """
                 CREATE TABLE IF NOT EXISTS residence_bridge_pending_tp (
@@ -98,6 +114,24 @@ class BridgeDatabase(private val config: BridgeConfig) {
         }
     }
 
+    fun hasCreateConflict(name: String): Boolean = connection().use { conn ->
+        conn.autoCommit = false
+        try {
+            deleteStaleReservations(conn)
+            val exists = conn.prepareStatement("SELECT 1 FROM residence_bridge_index WHERE name_key=? LIMIT 1").use { ps ->
+                ps.setString(1, key(name))
+                ps.executeQuery().use { rs -> rs.next() }
+            }
+            conn.commit()
+            exists
+        } catch (t: Throwable) {
+            conn.rollback()
+            throw t
+        } finally {
+            conn.autoCommit = true
+        }
+    }
+
     fun tryReserveCreate(name: String, ownerUuid: UUID, ownerName: String, maxResidences: Int): CreateReservationResult = connection().use { conn ->
         conn.autoCommit = false
         try {
@@ -141,7 +175,7 @@ class BridgeDatabase(private val config: BridgeConfig) {
     }
 
     fun deleteReservationIfLocal(name: String) = connection().use { conn ->
-        conn.prepareStatement("DELETE FROM residence_bridge_index WHERE name_key=? AND server_id=?").use { ps ->
+        conn.prepareStatement("DELETE FROM residence_bridge_index WHERE name_key=? AND server_id=? AND status='RESERVED'").use { ps ->
             ps.setString(1, key(name))
             ps.setString(2, config.serverId)
             ps.executeUpdate()
@@ -149,8 +183,9 @@ class BridgeDatabase(private val config: BridgeConfig) {
     }
 
     fun delete(name: String) = connection().use { conn ->
-        conn.prepareStatement("DELETE FROM residence_bridge_index WHERE name_key=?").use { ps ->
+        conn.prepareStatement("DELETE FROM residence_bridge_index WHERE name_key=? AND server_id=?").use { ps ->
             ps.setString(1, key(name))
+            ps.setString(2, config.serverId)
             ps.executeUpdate()
         }
     }
@@ -197,6 +232,102 @@ class BridgeDatabase(private val config: BridgeConfig) {
         ResidenceListPage(entries, total, safePage, pageSize)
     }
 
+    fun listResidencesByOwnerName(ownerName: String, page: Int, pageSize: Int): ResidenceListPage = connection().use { conn ->
+        val normalizedPage = max(1, page)
+        val total = conn.prepareStatement(
+            """
+            SELECT COUNT(*) FROM residence_bridge_index
+            WHERE status='ACTIVE' AND LOWER(owner_name)=LOWER(?)
+            """.trimIndent()
+        ).use { ps ->
+            ps.setString(1, ownerName)
+            ps.executeQuery().use { rs -> if (rs.next()) rs.getInt(1) else 0 }
+        }
+        val maxPage = if (total <= 0) 1 else ((total - 1) / pageSize) + 1
+        val safePage = normalizedPage.coerceAtMost(maxPage)
+        val offset = (safePage - 1) * pageSize
+        val entries = conn.prepareStatement(
+            """
+            SELECT * FROM residence_bridge_index
+            WHERE status='ACTIVE' AND LOWER(owner_name)=LOWER(?)
+            ORDER BY server_id ASC, display_name ASC
+            LIMIT ? OFFSET ?
+            """.trimIndent()
+        ).use { ps ->
+            ps.setString(1, ownerName)
+            ps.setInt(2, pageSize)
+            ps.setInt(3, offset)
+            ps.executeQuery().use { rs ->
+                val result = mutableListOf<ResidenceIndexEntry>()
+                while (rs.next()) {
+                    result += rs.toIndexEntry()
+                }
+                result
+            }
+        }
+        ResidenceListPage(entries, total, safePage, pageSize)
+    }
+
+    fun listCompletionResidenceNames(limit: Int = 500): List<String> = connection().use { conn ->
+        conn.prepareStatement(
+            """
+            SELECT display_name FROM residence_bridge_index
+            WHERE status='ACTIVE'
+            ORDER BY display_name ASC
+            LIMIT ?
+            """.trimIndent()
+        ).use { ps ->
+            ps.setInt(1, limit)
+            ps.executeQuery().use { rs ->
+                val result = mutableListOf<String>()
+                while (rs.next()) {
+                    result += rs.getString("display_name")
+                }
+                result
+            }
+        }
+    }
+
+    fun listCompletionResidences(limit: Int = 500): List<ResidenceIndexEntry> = connection().use { conn ->
+        conn.prepareStatement(
+            """
+            SELECT * FROM residence_bridge_index
+            WHERE status='ACTIVE'
+            ORDER BY display_name ASC
+            LIMIT ?
+            """.trimIndent()
+        ).use { ps ->
+            ps.setInt(1, limit)
+            ps.executeQuery().use { rs ->
+                val result = mutableListOf<ResidenceIndexEntry>()
+                while (rs.next()) {
+                    result += rs.toIndexEntry()
+                }
+                result
+            }
+        }
+    }
+
+    fun listCompletionOwnerNames(limit: Int = 500): List<String> = connection().use { conn ->
+        conn.prepareStatement(
+            """
+            SELECT DISTINCT owner_name FROM residence_bridge_index
+            WHERE status='ACTIVE' AND owner_name IS NOT NULL AND owner_name<>''
+            ORDER BY owner_name ASC
+            LIMIT ?
+            """.trimIndent()
+        ).use { ps ->
+            ps.setInt(1, limit)
+            ps.executeQuery().use { rs ->
+                val result = mutableListOf<String>()
+                while (rs.next()) {
+                    result += rs.getString("owner_name")
+                }
+                result
+            }
+        }
+    }
+
     fun replaceRenamed(oldName: String, newSnapshot: ResidenceSnapshot) = connection().use { conn ->
         conn.autoCommit = false
         try {
@@ -219,17 +350,20 @@ class BridgeDatabase(private val config: BridgeConfig) {
     fun syncServerSnapshots(snapshots: List<ResidenceSnapshot>) = connection().use { conn ->
         conn.autoCommit = false
         try {
+            val pruneBefore = System.currentTimeMillis() - ACTIVE_PRUNE_GRACE_MILLIS
             snapshots.forEach { upsertSnapshot(conn, it) }
             if (snapshots.isEmpty()) {
-                conn.prepareStatement("DELETE FROM residence_bridge_index WHERE server_id=? AND status='ACTIVE'").use { ps ->
+                conn.prepareStatement("DELETE FROM residence_bridge_index WHERE server_id=? AND status='ACTIVE' AND updated_at<?").use { ps ->
                     ps.setString(1, config.serverId)
+                    ps.setLong(2, pruneBefore)
                     ps.executeUpdate()
                 }
             } else {
                 val marks = snapshots.joinToString(",") { "?" }
-                conn.prepareStatement("DELETE FROM residence_bridge_index WHERE server_id=? AND status='ACTIVE' AND name_key NOT IN ($marks)").use { ps ->
+                conn.prepareStatement("DELETE FROM residence_bridge_index WHERE server_id=? AND status='ACTIVE' AND updated_at<? AND name_key NOT IN ($marks)").use { ps ->
                     ps.setString(1, config.serverId)
-                    snapshots.forEachIndexed { index, snapshot -> ps.setString(index + 2, snapshot.nameKey) }
+                    ps.setLong(2, pruneBefore)
+                    snapshots.forEachIndexed { index, snapshot -> ps.setString(index + 3, snapshot.nameKey) }
                     ps.executeUpdate()
                 }
             }
@@ -287,16 +421,22 @@ class BridgeDatabase(private val config: BridgeConfig) {
     fun consumePending(playerUuid: UUID): PendingTeleport? = connection().use { conn ->
         conn.autoCommit = false
         try {
-            val pending = conn.prepareStatement("SELECT * FROM residence_bridge_pending_tp WHERE player_uuid=?").use { ps ->
+            val pending = conn.prepareStatement(
+                "SELECT * FROM residence_bridge_pending_tp WHERE player_uuid=? AND target_server=?"
+            ).use { ps ->
                 ps.setString(1, playerUuid.toString())
+                ps.setString(2, config.serverId)
                 ps.executeQuery().use { rs -> if (rs.next()) rs.toPendingTeleport() else null }
             }
-            conn.prepareStatement("DELETE FROM residence_bridge_pending_tp WHERE player_uuid=?").use { ps ->
-                ps.setString(1, playerUuid.toString())
-                ps.executeUpdate()
+            if (pending != null) {
+                conn.prepareStatement("DELETE FROM residence_bridge_pending_tp WHERE player_uuid=? AND target_server=?").use { ps ->
+                    ps.setString(1, playerUuid.toString())
+                    ps.setString(2, config.serverId)
+                    ps.executeUpdate()
+                }
             }
             conn.commit()
-            pending?.takeIf { it.expireAt >= System.currentTimeMillis() && it.targetServer.equals(config.serverId, ignoreCase = true) }
+            pending?.takeIf { it.expireAt >= System.currentTimeMillis() }
         } catch (t: Throwable) {
             conn.rollback()
             throw t
@@ -357,25 +497,46 @@ class BridgeDatabase(private val config: BridgeConfig) {
         conn.prepareStatement(
             """
             INSERT INTO residence_bridge_index
-                        (name_key, display_name, server_id, world, owner_uuid, owner_name, status, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?)
+              (name_key, display_name, server_id, world, tp_world, tp_x, tp_y, tp_z, tp_yaw, tp_pitch, owner_uuid, owner_name, status, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?)
             ON DUPLICATE KEY UPDATE
-              display_name=VALUES(display_name),
-              server_id=VALUES(server_id),
-              world=VALUES(world),
-              owner_uuid=VALUES(owner_uuid),
-              owner_name=VALUES(owner_name),
-                            status='ACTIVE',
-              updated_at=VALUES(updated_at)
+                            display_name=IF(status='ACTIVE' AND server_id<>VALUES(server_id), display_name, VALUES(display_name)),
+                            server_id=IF(status='ACTIVE' AND server_id<>VALUES(server_id), server_id, VALUES(server_id)),
+                            world=IF(status='ACTIVE' AND server_id<>VALUES(server_id), world, VALUES(world)),
+                            tp_world=IF(status='ACTIVE' AND server_id<>VALUES(server_id), tp_world, VALUES(tp_world)),
+                            tp_x=IF(status='ACTIVE' AND server_id<>VALUES(server_id), tp_x, VALUES(tp_x)),
+                            tp_y=IF(status='ACTIVE' AND server_id<>VALUES(server_id), tp_y, VALUES(tp_y)),
+                            tp_z=IF(status='ACTIVE' AND server_id<>VALUES(server_id), tp_z, VALUES(tp_z)),
+                            tp_yaw=IF(status='ACTIVE' AND server_id<>VALUES(server_id), tp_yaw, VALUES(tp_yaw)),
+                            tp_pitch=IF(status='ACTIVE' AND server_id<>VALUES(server_id), tp_pitch, VALUES(tp_pitch)),
+                            owner_uuid=IF(status='ACTIVE' AND server_id<>VALUES(server_id), owner_uuid, VALUES(owner_uuid)),
+                            owner_name=IF(status='ACTIVE' AND server_id<>VALUES(server_id), owner_name, VALUES(owner_name)),
+                            status=IF(status='ACTIVE' AND server_id<>VALUES(server_id), status, 'ACTIVE'),
+                            updated_at=IF(status='ACTIVE' AND server_id<>VALUES(server_id), updated_at, VALUES(updated_at))
             """.trimIndent()
         ).use { ps ->
             ps.setString(1, snapshot.nameKey)
             ps.setString(2, snapshot.name)
             ps.setString(3, config.serverId)
             ps.setString(4, snapshot.worldName)
-            ps.setString(5, snapshot.ownerUuid?.toString())
-            ps.setString(6, snapshot.ownerName)
-            ps.setLong(7, System.currentTimeMillis())
+            val teleport = snapshot.teleportLocation
+            ps.setString(5, teleport?.worldName)
+            if (teleport == null) {
+                ps.setNull(6, java.sql.Types.DOUBLE)
+                ps.setNull(7, java.sql.Types.DOUBLE)
+                ps.setNull(8, java.sql.Types.DOUBLE)
+                ps.setNull(9, java.sql.Types.FLOAT)
+                ps.setNull(10, java.sql.Types.FLOAT)
+            } else {
+                ps.setDouble(6, teleport.x)
+                ps.setDouble(7, teleport.y)
+                ps.setDouble(8, teleport.z)
+                ps.setFloat(9, teleport.yaw)
+                ps.setFloat(10, teleport.pitch)
+            }
+            ps.setString(11, snapshot.ownerUuid?.toString())
+            ps.setString(12, snapshot.ownerName)
+            ps.setLong(13, System.currentTimeMillis())
             ps.executeUpdate()
         }
     }
@@ -434,8 +595,22 @@ class BridgeDatabase(private val config: BridgeConfig) {
             worldName = getString("world"),
             ownerUuid = getString("owner_uuid")?.let { UUID.fromString(it) },
             ownerName = getString("owner_name"),
-            updatedAt = getLong("updated_at")
+            updatedAt = getLong("updated_at"),
+            teleportLocation = readBridgeLocation()
         )
+    }
+
+    private fun ResultSet.readBridgeLocation(): BridgeLocation? {
+        val world = getString("tp_world") ?: return null
+        val x = getDouble("tp_x")
+        if (wasNull()) return null
+        val y = getDouble("tp_y")
+        if (wasNull()) return null
+        val z = getDouble("tp_z")
+        if (wasNull()) return null
+        val yaw = getFloat("tp_yaw").let { if (wasNull()) 0f else it }
+        val pitch = getFloat("tp_pitch").let { if (wasNull()) 0f else it }
+        return BridgeLocation(world, x, y, z, yaw, pitch)
     }
 
     private fun ResultSet.toPendingTeleport(): PendingTeleport {

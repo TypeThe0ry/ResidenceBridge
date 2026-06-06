@@ -33,14 +33,21 @@ teleport:
   # 跨服传送请求的有效期（秒）
   # 玩家必须在此时间内成功进入目标服，否则传送请求失效
   pending-expire-seconds: 30
-  # 玩家进入目标服后延迟多少 tick 再执行传送
-  # 建议保留此延迟，确保 Residence 数据加载完成后再传送
-  join-delay-ticks: 40
+  # 玩家进入目标服后延迟多少 tick 再执行远程操作；跨服传送会立即尝试并自动短间隔重试
+  join-delay-ticks: 0
   # 按权限设置 /res tp 等待时间，拥有多个权限时取最短等待时间
+  # LuckPerms 示例：/lp group vip permission set reslink.tp.vip true
+  # 管理员/OP 或拥有 bypass-permission 的玩家会跳过等待
   wait:
+    enabled: true
     default-seconds: 3
+    bypass-permission: "residencebridge.teleport.bypass"
     cancel-on-move: true
     cancel-on-damage: true
+    # 每秒倒计时提示音；填空字符串可关闭
+    countdown-sound: "BLOCK_NOTE_BLOCK_PLING"
+    countdown-sound-volume: 1.0
+    countdown-sound-pitch: 1.2
     groups:
       default:
         permission: "ResLinkDefault"
@@ -54,6 +61,7 @@ teleport:
 
 # ─── 全区领地数量限制 ─────────────────────────────
 # 拥有多个权限时取最大上限；拥有 bypass-permission 时不限制数量
+# LuckPerms 示例：/lp group vip permission set reslink.count.vip true
 limits:
   default-max-residences: 3
   bypass-permission: "residencebridge.limit.bypass"
@@ -71,7 +79,10 @@ limits:
 # ─── /res list 全区列表 ───────────────────────────
 list:
   page-size: 8
+  # 管理员可使用 /res list <玩家名> [页码] 查看其他玩家的全服领地
+  others-permission: "residencebridge.list.others"
   header: "&#66ccff你的全区领地列表 &7(&f%count%&7) &8- &7第 &f%page%&7/&f%max_page% &7页"
+  other-header: "&#66ccff%target% 的全区领地列表 &7(&f%count%&7) &8- &7第 &f%page%&7/&f%max_page% &7页"
   line: "&7- &a%name% &8[&f%server%&8] &7%world%"
   empty: "&e你还没有任何领地。"
 
@@ -101,7 +112,7 @@ messages:
   duplicate: "&c全服已存在同名领地：&f%name%"
   not-found: "&c没有找到这个领地：&f%name%"
   switching: "&a正在传送到领地所在服务器：&f%server%"
-  local-teleport-failed: "&c本服领地传送失败，请联系管理员。"
+  local-teleport-failed: "&c你没有权限执行这个操作。"
   connect-request-failed: "&c跨服传送请求失败，请稍后再试。"
   limit-reached: "&c你的全区领地数量已达上限：&f%count%/%max%"
   teleport-wait: "&a传送将在 &f%seconds% &a秒后开始，请不要移动。"
