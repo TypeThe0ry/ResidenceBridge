@@ -29,4 +29,38 @@ data class PendingTeleport(
     val expireAt: Long
 )
 
+data class PendingAction(
+    val id: Long,
+    val playerUuid: UUID,
+    val playerName: String,
+    val actionType: String,
+    val commandText: String,
+    val residenceName: String,
+    val targetServer: String,
+    val expireAt: Long
+)
+
+data class ResidenceListPage(
+    val entries: List<ResidenceIndexEntry>,
+    val total: Int,
+    val page: Int,
+    val pageSize: Int
+) {
+    val maxPage: Int = if (total <= 0) 1 else ((total - 1) / pageSize) + 1
+}
+
+enum class CreateReservationStatus {
+    RESERVED,
+    DUPLICATE,
+    LIMIT_REACHED
+}
+
+data class CreateReservationResult(
+    val status: CreateReservationStatus,
+    val count: Int,
+    val max: Int
+) {
+    val reserved: Boolean = status == CreateReservationStatus.RESERVED
+}
+
 fun key(name: String): String = name.trim().lowercase(java.util.Locale.ROOT)

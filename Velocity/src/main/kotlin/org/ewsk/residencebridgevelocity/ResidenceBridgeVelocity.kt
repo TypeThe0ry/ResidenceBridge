@@ -35,11 +35,14 @@ object ResidenceBridgeVelocity : Plugin() {
         if (event.source !is ServerConnection) {
             return
         }
-        val targetServer = event.data.decodeToString().trim()
+        val targetServer = parseTargetServer(event.data.decodeToString().trim())
         if (targetServer.isEmpty()) {
             return
         }
-        val server = VelocityPlugin.getInstance().server.getServer(targetServer).orElse(null)
+        val proxy = VelocityPlugin.getInstance().server
+        val server = proxy.getServer(targetServer).orElseGet {
+            proxy.allServers.firstOrNull { it.serverInfo.name.equals(targetServer, ignoreCase = true) }
+        }
         if (server == null) {
             warning("Target server not found: $targetServer")
             return
@@ -48,5 +51,12 @@ object ResidenceBridgeVelocity : Plugin() {
             warning("Failed to connect ${player.username} to $targetServer: ${it.message}")
             null
         }
+    }
+
+    private fun parseTargetServer(payload: String): String {
+        if (payload.startsWith("connect|", ignoreCase = true)) {
+            return payload.substringAfter('|').trim()
+        }
+        return payload
     }
 }

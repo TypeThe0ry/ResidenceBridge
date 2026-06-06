@@ -30,6 +30,7 @@ taboolib {
 
 repositories {
     mavenCentral()
+    maven("https://repo.extendedclip.com/content/repositories/placeholderapi/")
 }
 
 dependencies {
@@ -38,6 +39,7 @@ dependencies {
     compileOnly(kotlin("stdlib"))
     compileOnly(fileTree("libs"))
     compileOnly("com.zaxxer:HikariCP:4.0.3")
+    compileOnly("me.clip:placeholderapi:2.11.6")
     //implementation("com.mysql:mysql-connector-j:8.0.33")
 }
 

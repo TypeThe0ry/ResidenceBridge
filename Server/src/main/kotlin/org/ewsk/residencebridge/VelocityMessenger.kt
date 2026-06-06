@@ -23,7 +23,7 @@ class VelocityMessenger(private val plugin: Plugin, private val config: BridgeCo
 
     fun requestConnect(player: Player, targetServer: String): Boolean {
         return try {
-            player.sendPluginMessage(plugin, config.velocityChannel, targetServer.encodeToByteArray())
+            player.sendPluginMessage(plugin, config.velocityChannel, "connect|$targetServer".encodeToByteArray())
             if (config.fallbackBungeeChannel) {
                 sendBungeeConnect(player, targetServer)
             }

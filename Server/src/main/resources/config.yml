@@ -36,6 +36,56 @@ teleport:
   # 玩家进入目标服后延迟多少 tick 再执行传送
   # 建议保留此延迟，确保 Residence 数据加载完成后再传送
   join-delay-ticks: 40
+  # 按权限设置 /res tp 等待时间，拥有多个权限时取最短等待时间
+  wait:
+    default-seconds: 3
+    cancel-on-move: true
+    cancel-on-damage: true
+    groups:
+      default:
+        permission: "ResLinkDefault"
+        seconds: 3
+      vip:
+        permission: "reslink.tp.vip"
+        seconds: 1
+      bypass:
+        permission: "residencebridge.teleport.bypass"
+        seconds: 0
+
+# ─── 全区领地数量限制 ─────────────────────────────
+# 拥有多个权限时取最大上限；拥有 bypass-permission 时不限制数量
+limits:
+  default-max-residences: 3
+  bypass-permission: "residencebridge.limit.bypass"
+  groups:
+    default:
+      permission: "ResLinkDefaultCount"
+      max-residences: 3
+    vip:
+      permission: "reslink.count.vip"
+      max-residences: 10
+    svip:
+      permission: "reslink.count.svip"
+      max-residences: 30
+
+# ─── /res list 全区列表 ───────────────────────────
+list:
+  page-size: 8
+  header: "&#66ccff你的全区领地列表 &7(&f%count%&7) &8- &7第 &f%page%&7/&f%max_page% &7页"
+  line: "&7- &a%name% &8[&f%server%&8] &7%world%"
+  empty: "&e你还没有任何领地。"
+
+# 这些指令在本服找不到领地时，会根据全局索引切换到领地所在服务器后自动执行
+remote-action-commands:
+  - "rename"
+  - "give"
+  - "remove"
+  - "delete"
+
+# ─── PlaceholderAPI ──────────────────────────────
+placeholder:
+  # 支持：%reslink_ressize%、%reslink_reslist_1%、%reslink_reslist_2% ...
+  cache-seconds: 30
 
 # ─── Velocity / BungeeCord 消息频道 ──────────────
 velocity:
@@ -53,3 +103,9 @@ messages:
   switching: "&a正在传送到领地所在服务器：&f%server%"
   local-teleport-failed: "&c本服领地传送失败，请联系管理员。"
   connect-request-failed: "&c跨服传送请求失败，请稍后再试。"
+  limit-reached: "&c你的全区领地数量已达上限：&f%count%/%max%"
+  teleport-wait: "&a传送将在 &f%seconds% &a秒后开始，请不要移动。"
+  teleport-cancelled: "&c传送已取消。"
+  remote-action-switching: "&a正在切换到领地所在服务器执行指令：&f%server%"
+  remote-action-queued: "&a已到达目标服务器，正在执行指令。"
+  no-permission: "&c你没有权限执行这个操作。"
