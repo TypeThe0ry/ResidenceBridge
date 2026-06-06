@@ -7,6 +7,7 @@
 [![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](https://github.com/TypeThe0ry0902/ResidenceBridge/releases)
 [![Java](https://img.shields.io/badge/Server-Java%208%2B-orange.svg)](https://adoptium.net)
 [![Minecraft](https://img.shields.io/badge/Minecraft-1.16%2B-brightgreen.svg)](https://papermc.io)
+<iframe src="//player.bilibili.com/player.html?isOutside=true&aid=116703723787842&bvid=BV1TNEJ6jE7J&cid=38914360203&p=1" scrolling="no" border="0" frameborder="no" framespacing="0" allowfullscreen="true"></iframe>
 
 ## Repository Layout
 
