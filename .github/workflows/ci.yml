@@ -1,4 +1,4 @@
-name: build
+name: Build and Release
 
 on:
   push:
@@ -12,55 +12,80 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: build-and-release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
+    name: Build plugins
     runs-on: ubuntu-latest
 
     steps:
-      - name: checkout repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: validate gradle wrappers
+      - name: Validate Gradle wrappers
         uses: gradle/actions/wrapper-validation@v4
 
-      - name: setup jdk 17
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
           cache: gradle
 
-      - name: make gradle wrappers executable
+      - name: Read project version
+        id: version
+        shell: bash
+        run: |
+          server_version="$(grep '^version=' Server/gradle.properties | cut -d= -f2 | tr -d '\r')"
+          velocity_version="$(grep '^version=' Velocity/gradle.properties | cut -d= -f2 | tr -d '\r')"
+
+          if [ -z "$server_version" ] || [ -z "$velocity_version" ]; then
+            echo "Missing version in gradle.properties" >&2
+            exit 1
+          fi
+
+          if [ "$server_version" != "$velocity_version" ]; then
+            echo "Version mismatch: Server=$server_version Velocity=$velocity_version" >&2
+            exit 1
+          fi
+
+          echo "version=$server_version" >> "$GITHUB_OUTPUT"
+          echo "Detected version: $server_version"
+
+      - name: Make Gradle wrappers executable
         run: |
           chmod +x Server/gradlew
           chmod +x Velocity/gradlew
 
-      - name: build server plugin
+      - name: Build server plugin
         working-directory: Server
-        run: ./gradlew build -Dkotlin.compiler.execution.strategy=in-process
+        run: ./gradlew -Dkotlin.compiler.execution.strategy=in-process clean build
 
-      - name: build velocity plugin
+      - name: Build velocity plugin
         working-directory: Velocity
-        run: ./gradlew build -Dkotlin.compiler.execution.strategy=in-process
+        run: ./gradlew -Dkotlin.compiler.execution.strategy=in-process clean build
 
-      - name: list build outputs
+      - name: Collect release artifacts
+        shell: bash
         run: |
-          echo "Server artifacts:"
-          ls -lah Server/build/libs/
-          echo "Velocity artifacts:"
-          ls -lah Velocity/build/libs/
+          version="${{ steps.version.outputs.version }}"
+          mkdir -p dist
+          cp "Server/build/libs/ResidenceBridge-${version}.jar" dist/
+          cp "Velocity/build/libs/ResidenceBridge-Velocity-${version}.jar" dist/
+          ls -lah dist
 
-      - name: upload actions artifacts
+      - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ResidenceBridge-1.2.0
-          path: |
-            Server/build/libs/*.jar
-            Velocity/build/libs/*.jar
+          name: ResidenceBridge-${{ steps.version.outputs.version }}
+          path: dist/*.jar
           if-no-files-found: error
 
-      - name: delete old latest release
-        if: github.ref == 'refs/heads/main'
+      - name: Delete old latest release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: dev-drprasad/delete-tag-and-release@v1.1
         continue-on-error: true
         with:
@@ -68,8 +93,8 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           delete_release: true
 
-      - name: publish latest release
-        if: github.ref == 'refs/heads/main'
+      - name: Publish latest release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: ncipollo/release-action@v1
         with:
           tag: latest
@@ -77,19 +102,28 @@ jobs:
           body: |
             自动构建版本
 
+            Version: ${{ steps.version.outputs.version }}
             Branch: main
             Commit: ${{ github.sha }}
-          artifacts: "Server/build/libs/*.jar,Velocity/build/libs/*.jar"
+          artifacts: "dist/*.jar"
           allowUpdates: true
           replacesArtifacts: true
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: publish version release
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Publish version release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         uses: ncipollo/release-action@v1
         with:
-          artifacts: "Server/build/libs/*.jar,Velocity/build/libs/*.jar"
-          token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ github.ref_name }}
+          name: ResidenceBridge ${{ github.ref_name }}
+          body: |
+            ResidenceBridge ${{ github.ref_name }}
+
+            Artifacts:
+            - ResidenceBridge-${{ steps.version.outputs.version }}.jar
+            - ResidenceBridge-Velocity-${{ steps.version.outputs.version }}.jar
+          artifacts: "dist/*.jar"
           allowUpdates: true
           replacesArtifacts: true
           generateReleaseNotes: true
+          token: ${{ secrets.GITHUB_TOKEN }}
