@@ -12,10 +12,10 @@
 
 Since 1.2.0, the sub-server plugin and Velocity proxy plugin live in the same repository. Releases build both jars, and both must be deployed.
 
-| Directory | Artifact | Deploy To | Java |
-|-----------|----------|-----------|------|
-| [Server](Server) | `ResidenceBridge-1.2.0.jar` | Every Bukkit/Paper/Folia sub-server | 8+ |
-| [Velocity](Velocity) | `ResidenceBridge-Velocity-1.2.0.jar` | Velocity proxy | 17+ |
+| Directory | Artifact | Deploy To |
+|-----------|----------|-----------|
+| [Server](Server) | `ResidenceBridge-1.2.0.jar` | Every Bukkit/Paper/Folia sub-server |
+| [Velocity](Velocity) | `ResidenceBridge-Velocity-1.2.0.jar` | Velocity proxy |
 
 Installing only one side is not enough for cross-server features.
 
