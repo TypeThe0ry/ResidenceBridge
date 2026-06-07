@@ -13,10 +13,10 @@ English version: [README.md](README.md)
 
 本仓库从 1.2.0 起合并了子服端和代理端代码，发布时会同时产出两个 jar，两个都需要部署。
 
-| 目录 | 产物 | 部署位置 | Java |
-|------|------|----------|------|
-| [Server](Server) | `ResidenceBridge-1.2.0.jar` | 每台 Bukkit/Paper/Folia 子服 | 8+ |
-| [Velocity](Velocity) | `ResidenceBridge-Velocity-1.2.0.jar` | Velocity 代理端 | 17+ |
+| 目录 | 产物 | 部署位置 |
+|------|------|----------|
+| [Server](Server) | `ResidenceBridge-1.2.0.jar` | 每台 Bukkit/Paper/Folia 子服 |
+| [Velocity](Velocity) | `ResidenceBridge-Velocity-1.2.0.jar` | Velocity 代理端 |
 
 > 只安装子服端或只安装 Velocity 端都不能完整使用跨服功能。
 
