@@ -1,0 +1,38 @@
+# Gradle
+.gradle/
+build/
+gradlew
+gradlew.bat
+gradle/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.iws
+*.ipr
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.bak*
+*.backup
+
+# Kotlin
+.kotlin/
+
+# Maven
+target/
+
+# Misc
+*.log
+out/
+.classpath
+.project
+.settings/
+bin/

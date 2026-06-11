@@ -48,14 +48,30 @@ jobs:
           fi
 
           if [ "$server_version" != "$velocity_version" ]; then
-            echo "Version mismatch: Server=$server_version Velocity=$velocity_version" >&2
+            echo "Version mismatch:" >&2
+            echo "Server:   $server_version" >&2
+            echo "Velocity: $velocity_version" >&2
             exit 1
+          fi
+
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag_version="${GITHUB_REF_NAME#v}"
+
+            if [ "$tag_version" != "$server_version" ]; then
+              echo "Tag version does not match gradle.properties version" >&2
+              echo "Tag version:      $tag_version" >&2
+              echo "Project version:  $server_version" >&2
+              echo "" >&2
+              echo "Fix one of them before publishing release." >&2
+              exit 1
+            fi
           fi
 
           echo "version=$server_version" >> "$GITHUB_OUTPUT"
           echo "Detected version: $server_version"
 
       - name: Make Gradle wrappers executable
+        shell: bash
         run: |
           chmod +x Server/gradlew
           chmod +x Velocity/gradlew
@@ -68,47 +84,42 @@ jobs:
         working-directory: Velocity
         run: ./gradlew -Dkotlin.compiler.execution.strategy=in-process clean build
 
-      - name: Collect release artifacts
+      - name: Collect artifacts
         shell: bash
         run: |
           version="${{ steps.version.outputs.version }}"
+
           mkdir -p dist
-          cp "Server/build/libs/ResidenceBridge-${version}.jar" dist/
-          cp "Velocity/build/libs/ResidenceBridge-Velocity-${version}.jar" dist/
+
+          server_jar="Server/build/libs/ResidenceBridge-${version}.jar"
+          velocity_jar="Velocity/build/libs/ResidenceBridge-Velocity-${version}.jar"
+
+          if [ ! -f "$server_jar" ]; then
+            echo "Missing server jar: $server_jar" >&2
+            echo "Available server jars:" >&2
+            ls -lah Server/build/libs || true
+            exit 1
+          fi
+
+          if [ ! -f "$velocity_jar" ]; then
+            echo "Missing velocity jar: $velocity_jar" >&2
+            echo "Available velocity jars:" >&2
+            ls -lah Velocity/build/libs || true
+            exit 1
+          fi
+
+          cp "$server_jar" dist/
+          cp "$velocity_jar" dist/
+
+          echo "Collected artifacts:"
           ls -lah dist
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ResidenceBridge-${{ steps.version.outputs.version }}
+          name: ResidenceBridge-${{ steps.version.outputs.version }}-${{ github.run_number }}
           path: dist/*.jar
           if-no-files-found: error
-
-      - name: Delete old latest release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: dev-drprasad/delete-tag-and-release@v1.1
-        continue-on-error: true
-        with:
-          tag_name: latest
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          delete_release: true
-
-      - name: Publish latest release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: ncipollo/release-action@v1
-        with:
-          tag: latest
-          name: Latest Build
-          body: |
-            自动构建版本
-
-            Version: ${{ steps.version.outputs.version }}
-            Branch: main
-            Commit: ${{ github.sha }}
-          artifacts: "dist/*.jar"
-          allowUpdates: true
-          replacesArtifacts: true
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish version release
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
@@ -119,11 +130,17 @@ jobs:
           body: |
             ResidenceBridge ${{ github.ref_name }}
 
-            Artifacts:
-            - ResidenceBridge-${{ steps.version.outputs.version }}.jar
-            - ResidenceBridge-Velocity-${{ steps.version.outputs.version }}.jar
+            ## Artifacts
+
+            - `ResidenceBridge-${{ steps.version.outputs.version }}.jar`
+            - `ResidenceBridge-Velocity-${{ steps.version.outputs.version }}.jar`
+
+            ## Build Info
+
+            - Version: `${{ steps.version.outputs.version }}`
+            - Tag: `${{ github.ref_name }}`
+            - Commit: `${{ github.sha }}`
           artifacts: "dist/*.jar"
-          allowUpdates: true
-          replacesArtifacts: true
+          allowUpdates: false
           generateReleaseNotes: true
           token: ${{ secrets.GITHUB_TOKEN }}
