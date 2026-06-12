@@ -36,8 +36,8 @@ English version: [README.md](README.md)
 ## 安装
 
 1. 下载同一版本的两个 jar。
-2. 将 `ResidenceBridge-1.2.0.jar` 放入每台子服的 `plugins/`。
-3. 将 `ResidenceBridge-Velocity-1.2.0.jar` 放入 Velocity 的 `plugins/`。
+2. 将 `ResidenceBridge` 放入每台子服的 `plugins/`。
+3. 将 `ResidenceBridge-Velocity` 放入 Velocity 的 `plugins/`。
 4. 确认每台子服已安装 Residence。
 5. 启动一次子服生成 `plugins/ResidenceBridge/config.yml`。
 6. 给每台子服配置唯一的 `server-id`，并填写相同的 MySQL 信息。
