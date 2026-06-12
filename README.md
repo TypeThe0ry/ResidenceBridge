@@ -35,8 +35,8 @@
 ## Installation
 
 1. Download both jars from the same release.
-2. Put `ResidenceBridge-1.2.0.jar` into `plugins/` on every sub-server.
-3. Put `ResidenceBridge-Velocity-1.2.0.jar` into `plugins/` on Velocity.
+2. Put `ResidenceBridge` into `plugins/` on every sub-server.
+3. Put `ResidenceBridge-Velocityr` into `plugins/` on Velocity.
 4. Make sure Residence is installed on every sub-server.
 5. Start each sub-server once to generate `plugins/ResidenceBridge/config.yml`.
 6. Configure a unique `server-id` for every sub-server and the same MySQL connection on all of them.
