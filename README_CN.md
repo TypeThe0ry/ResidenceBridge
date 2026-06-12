@@ -4,21 +4,10 @@ English version: [README.md](README.md)
 
 > 跨服领地桥接插件，让 [Residence](https://www.spigotmc.org/resources/residence.11480/) 在 Velocity / BungeeCord 多服网络中共享领地索引、跨服传送和全区限制。
 
-[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](https://github.com/TypeThe0ry0902/ResidenceBridge/releases)
 [![Server Java](https://img.shields.io/badge/Server-Java%208%2B-orange.svg)](https://adoptium.net)
 [![Velocity Java](https://img.shields.io/badge/Velocity-Java%2017%2B-orange.svg)](https://adoptium.net)
 [![Minecraft](https://img.shields.io/badge/Minecraft-1.16%2B-brightgreen.svg)](https://papermc.io)
 
-## 仓库结构
-
-本仓库从 1.2.0 起合并了子服端和代理端代码，发布时会同时产出两个 jar，两个都需要部署。
-
-| 目录 | 产物 | 部署位置 |
-|------|------|----------|
-| [Server](Server) | `ResidenceBridge-1.2.0.jar` | 每台 Bukkit/Paper/Folia 子服 |
-| [Velocity](Velocity) | `ResidenceBridge-Velocity-1.2.0.jar` | Velocity 代理端 |
-
-> 只安装子服端或只安装 Velocity 端都不能完整使用跨服功能。
 
 ## 功能
 
