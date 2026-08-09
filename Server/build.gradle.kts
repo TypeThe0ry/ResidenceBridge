@@ -40,6 +40,7 @@ dependencies {
     compileOnly(fileTree("libs"))
     compileOnly("com.zaxxer:HikariCP:4.0.3")
     compileOnly("me.clip:placeholderapi:2.11.6")
+    testImplementation(kotlin("test-junit"))
     //implementation("com.mysql:mysql-connector-j:8.0.33")
 }
 

@@ -236,8 +236,8 @@ cd Velocity
 Artifacts:
 
 ```text
-Server/build/libs/ResidenceBridge-1.2.0.jar
-Velocity/build/libs/ResidenceBridge-Velocity-1.2.0.jar
+Server/build/libs/ResidenceBridge-1.2.4.jar
+Velocity/build/libs/ResidenceBridge-Velocity-1.2.4.jar
 ```
 
 GitHub Actions builds and uploads both jars on `main` pushes and `v*` tags.

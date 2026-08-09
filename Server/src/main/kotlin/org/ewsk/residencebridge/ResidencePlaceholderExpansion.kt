@@ -16,7 +16,7 @@ class ResidencePlaceholderExpansion(
 
     override fun getAuthor(): String = "ResidenceBridge"
 
-    override fun getVersion(): String = "1.2.0"
+    override fun getVersion(): String = "1.2.4"
 
     override fun persist(): Boolean = true
 

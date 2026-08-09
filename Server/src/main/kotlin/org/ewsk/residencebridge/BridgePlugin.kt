@@ -225,7 +225,7 @@ object BridgePlugin {
             else -> emptyList()
         }
         if (handled) {
-            event.completions = suggestions.distinct().sortedWith(String.CASE_INSENSITIVE_ORDER)
+            event.completions = combineTabCompletions(parsed.subCommand, event.completions, suggestions)
         }
     }
 
@@ -1009,8 +1009,9 @@ object BridgePlugin {
         }
 
         override fun tabComplete(sender: CommandSender, alias: String, args: Array<out String>): MutableList<String> {
-            tabCompleteFromCommandMap(sender, args)?.let { return it }
-            return runCatching { original.tabComplete(sender, alias, args) }.getOrElse { mutableListOf() }
+            val nativeSuggestions = runCatching { original.tabComplete(sender, alias, args) }.getOrElse { mutableListOf() }
+            val bridgeSuggestions = tabCompleteFromCommandMap(sender, args) ?: return nativeSuggestions
+            return combineTabCompletions(args[0], nativeSuggestions, bridgeSuggestions)
         }
     }
 
@@ -1044,4 +1045,27 @@ object BridgePlugin {
         val currentArg = if (trailingSpace || args.isEmpty()) "" else args.last()
         return ParsedTabCommand(subCommand, argIndex, currentArg)
     }
+}
+
+private val commandsWithNativeResidenceCompletions = setOf(
+    "remove"
+)
+
+internal fun combineTabCompletions(
+    subCommand: String,
+    nativeSuggestions: Iterable<String>,
+    bridgeSuggestions: Iterable<String>
+): MutableList<String> {
+    val groups = if (subCommand.lowercase(Locale.ROOT) in commandsWithNativeResidenceCompletions) {
+        arrayOf(nativeSuggestions, bridgeSuggestions)
+    } else {
+        arrayOf(bridgeSuggestions)
+    }
+    val completionsByKey = linkedMapOf<String, String>()
+    groups.forEach { completions ->
+        completions.forEach { completion ->
+            completionsByKey.putIfAbsent(completion.lowercase(Locale.ROOT), completion)
+        }
+    }
+    return completionsByKey.values.sortedWith(String.CASE_INSENSITIVE_ORDER).toMutableList()
 }
