@@ -1,0 +1,38 @@
+list:
+  header: "<color:#66ccff>你的全区领地列表 <gray>(<white><count><gray>) <dark_gray>- <gray>第 <white><page><gray>/<white><max_page> <gray>页"
+  other-header: "<color:#66ccff><target> 的全区领地列表 <gray>(<white><count><gray>) <dark_gray>- <gray>第 <white><page><gray>/<white><max_page> <gray>页"
+  line: "<gray>- <green><name> <dark_gray>[<white><server><dark_gray>] <gray><world>"
+  empty: "<yellow>你还没有任何领地。"
+residence:
+  duplicate: "<red>全服已存在同名领地：<white><name>"
+  not-found: "<red>没有找到这个领地：<white><name>"
+  limit-reached: "<red>你的全区领地数量已达上限：<white><count>/<max>"
+teleport:
+  switching: "<green>正在传送到领地所在服务器：<white><server>"
+  connect-failed: "<red>连接目标服务器失败，请稍后再试。"
+  server-not-found: "<red>目标服务器不存在：<white><server>"
+  server-offline: "<red>目标服务器当前未启动或无法连接：<white><server>"
+  status-unavailable: "<red>暂时无法确认目标服务器状态，请稍后再试。"
+  wait: "<green>传送将在 <white><seconds> <green>秒后开始，请不要移动。"
+  cancelled: "<red>传送已取消。"
+  local-failed: "<red>本地传送失败，你可能没有权限。"
+remote:
+  switching: "<green>正在切换到领地所在服务器执行指令：<white><server>"
+  queued: "<green>已到达目标服务器，正在执行指令。"
+command:
+  no-permission: "<red>你没有权限执行这个操作。"
+  reload-success: "<green>ResidenceBridge 已重载。"
+  reload-failed: "<red>ResidenceBridge 重载失败：<error>"
+  sync-start: "<green>ResidenceBridge 同步已开始。"
+  sync-success: "<green>ResidenceBridge 已同步 <count> 个领地。"
+  sync-failed: "<red>ResidenceBridge 同步失败：<error>"
+common:
+  unlimited: "无限"
+debug:
+  plugin: "<gray>Residence 插件：<white><value>"
+  instance: "<gray>Residence 实例类：<white><value>"
+  manager: "<gray>Residence 管理器类：<white><value>"
+  names: "<gray>Residence 名称：<white><count> <values>"
+  values: "<gray>Residence 内存快照：<white><count>"
+  file-snapshots: "<gray>Residence 文件快照：<white><count> <values>"
+  snapshots: "<gray>合并快照：<white><count> <values>"

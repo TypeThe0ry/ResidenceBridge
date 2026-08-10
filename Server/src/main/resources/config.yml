@@ -76,15 +76,17 @@ limits:
       permission: "reslink.count.svip"
       max-residences: 30
 
+# ─── 语言 ─────────────────────────────────────────
+# 玩家消息位于 lang/ 目录；可使用 MiniMessage 格式。
+language:
+  default-locale: zh_CN
+  follow-client: true
+
 # ─── /res list 全区列表 ───────────────────────────
 list:
   page-size: 8
   # 管理员可使用 /res list <玩家名> [页码] 查看其他玩家的全服领地
   others-permission: "residencebridge.list.others"
-  header: "&#66ccff你的全区领地列表 &7(&f%count%&7) &8- &7第 &f%page%&7/&f%max_page% &7页"
-  other-header: "&#66ccff%target% 的全区领地列表 &7(&f%count%&7) &8- &7第 &f%page%&7/&f%max_page% &7页"
-  line: "&7- &a%name% &8[&f%server%&8] &7%world%"
-  empty: "&e你还没有任何领地。"
 
 # 这些指令在本服找不到领地时，会根据全局索引切换到领地所在服务器后自动执行
 remote-action-commands:
@@ -105,18 +107,8 @@ velocity:
   # 是否同时发送 BungeeCord 格式的连接消息
   # 使用 BungeeCord 代理时请保持 true；纯 Velocity 环境可设为 false
   fallback-bungee-channel: true
+  # 等待代理确认目标服务器存在且在线的最长时间（tick）
+  server-status-timeout-ticks: 60
 
-# ─── 玩家提示消息 ────────────────────────────────
-# 支持 & 颜色代码，可用占位符：%name%（领地名）、%server%（服务器名）
-messages:
-  duplicate: "&c全服已存在同名领地：&f%name%"
-  not-found: "&c没有找到这个领地：&f%name%"
-  switching: "&a正在传送到领地所在服务器：&f%server%"
-  local-teleport-failed: "&c你没有权限执行这个操作。"
-  connect-request-failed: "&c跨服传送请求失败，请稍后再试。"
-  limit-reached: "&c你的全区领地数量已达上限：&f%count%/%max%"
-  teleport-wait: "&a传送将在 &f%seconds% &a秒后开始，请不要移动。"
-  teleport-cancelled: "&c传送已取消。"
-  remote-action-switching: "&a正在切换到领地所在服务器执行指令：&f%server%"
-  remote-action-queued: "&a已到达目标服务器，正在执行指令。"
-  no-permission: "&c你没有权限执行这个操作。"
+# 玩家与管理员消息请在 plugins/ResidenceBridge/lang/ 中修改。
+# 升级旧版本时，原 list/messages 自定义文案会自动迁移一次。

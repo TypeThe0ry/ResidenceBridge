@@ -15,30 +15,94 @@ import java.util.concurrent.ConcurrentHashMap
 object ResidenceHook {
 
     // ===== 反射缓存 =====
-    private val classCache = ConcurrentHashMap<String, Class<*>?>()
-    private val methodCache = ConcurrentHashMap<String, Method?>()
-    private val fieldCache = ConcurrentHashMap<String, Field?>()
-    private val flagCache = ConcurrentHashMap<String, Any?>()
-    private val flagComboCache = ConcurrentHashMap<String, Any?>()
+    // ConcurrentHashMap 不接受 null value，而反射查找「没找到」是完全正常的结果
+    // （不同 Residence 版本字段/方法名不同，Flag 也可能不存在）。
+    // 直接 getOrPut 存 null 会在 putIfAbsent 里抛 NPE，把整条调用链打断，
+    // 所以统一用哨兵对象表示「查过且不存在」，既避免 NPE 也不会每次重复反射。
+    private val ABSENT = Any()
+    private val classCache = ConcurrentHashMap<String, Any>()
+    private val methodCache = ConcurrentHashMap<String, Any>()
+    private val fieldCache = ConcurrentHashMap<String, Any>()
+    private val flagCache = ConcurrentHashMap<String, Any>()
+    private val flagComboCache = ConcurrentHashMap<String, Any>()
+
+    /**
+     * 缓存可能为 null 的反射查找结果：命中哨兵表示之前查过且不存在。
+     */
+    private inline fun <reified T : Any> ConcurrentHashMap<String, Any>.cachedOrNull(
+        key: String,
+        resolve: () -> T?
+    ): T? {
+        when (val cached = this[key]) {
+            ABSENT -> return null
+            is T -> return cached
+        }
+        val resolved = resolve()
+        this[key] = resolved ?: ABSENT
+        return resolved
+    }
 
     // ===== sparrow-reflection Proxy =====
-    private val residencePluginProxy by lazy { createProxy(ResidencePluginProxy::class.java) }
-    private val managerProxy by lazy { createProxy(ResidenceManagerProxy::class.java) }
-    private val claimedResidenceProxy by lazy { createProxy(ClaimedResidenceProxy::class.java) }
-    private val flagsProxy by lazy { createProxy(FlagsProxy::class.java) }
-    private val permissionsProxy by lazy { createProxy(FlagPermissionsProxy::class.java) }
-    private val flagComboProxy by lazy { createProxy(FlagComboProxy::class.java) }
+    // ResidenceBridge 对 Residence 是硬依赖，进入本对象时目标插件已经启用；直接初始化代理，
+    // 把一次性的类加载/ASM 生成留在插件启动阶段，并移除热路径上的 SynchronizedLazyImpl 读取。
+    private val residencePluginProxy = createProxy(ResidencePluginProxy::class.java)
+    private val managerProxy = createProxy(ResidenceManagerProxy::class.java)
+    private val claimedResidenceProxy = createProxy(ClaimedResidenceProxy::class.java)
+    private val flagsProxy = createProxy(FlagsProxy::class.java)
+    private val permissionsProxy = createProxy(FlagPermissionsProxy::class.java)
+    private val flagComboProxy = createProxy(FlagComboProxy::class.java)
 
-    private val residenceInstance: Any? by lazy { resolveResidenceInstance() }
-    private val residenceManager: Any? by lazy {
-        proxySafe { residencePluginProxy?.getResidenceManager(residenceInstance) }
-            ?: residenceInstance?.value("getResidenceManager", "rmanager", "residenceManager")
+    // Residence 实例与 manager 不能用 by lazy 缓存：lazy 会把「解析失败」也永久记住。
+    // 插件加载顺序、Residence 延迟初始化或 /reload 都可能让首次解析拿到 null，
+    // 之后即使 Residence 已就绪也再也取不到 manager，同步会静默退化成只读文件快照。
+    // 这里只缓存成功结果，失败时下次调用重试；命中后是一次 volatile 读，不比 lazy 贵。
+    @Volatile
+    private var residenceInstanceCache: Any? = null
+    @Volatile
+    private var residenceManagerCache: Any? = null
+
+    private val residenceInstance: Any?
+        get() = residenceInstanceCache ?: resolveResidenceInstance()?.also { residenceInstanceCache = it }
+
+    private val residenceManager: Any?
+        get() = residenceManagerCache ?: resolveResidenceManager()?.also { residenceManagerCache = it }
+
+    private fun resolveResidenceManager(): Any? {
+        val instance = residenceInstance ?: return null
+        return proxySafe { residencePluginProxy?.getResidenceManager(instance) }
+            ?: instance.value("getResidenceManager", "rmanager", "residenceManager")
     }
-    private val flagsTp by lazy { proxySafe { flagsProxy?.tp() } ?: residenceFlag("tp") }
-    private val flagsMove by lazy { proxySafe { flagsProxy?.move() } ?: residenceFlag("move") }
-    private val flagComboTrueOrNone by lazy { proxySafe { flagComboProxy?.trueOrNone() } ?: residenceFlagCombo("TrueOrNone") }
+    // 同理：Flag 对象在 Residence 就绪前解析会得到 null，用 lazy 会永久锁死，
+    // 让 tp/move 权限判断之后一直失效。这些已由 flagCache/flagComboCache 内部缓存，
+    // 这里直接透传即可。
+    private val flagsTp: Any?
+        get() = proxySafe { flagsProxy?.tp() } ?: residenceFlag("tp")
+    private val flagsMove: Any?
+        get() = proxySafe { flagsProxy?.move() } ?: residenceFlag("move")
+    private val flagComboTrueOrNone: Any?
+        get() = proxySafe { flagComboProxy?.trueOrNone() } ?: residenceFlagCombo("TrueOrNone")
+
+    /**
+     * 在插件启用阶段完成一次性代理生成、类加载和 manager/flag 解析，避免首个定时同步
+     * 或首条玩家命令承担 ClassLoader/ZipFile I/O。Residence 是硬依赖，此时应已完成启用。
+     */
+    fun warmUp() {
+        residenceManager
+        flagsTp
+        flagsMove
+        flagComboTrueOrNone
+    }
+
+    /**
+     * /rb reload 时丢弃绑定到旧 Residence 运行时对象的成功缓存；反射元数据缓存仍可复用。
+     */
+    fun resetRuntimeCaches() {
+        residenceManagerCache = null
+        residenceInstanceCache = null
+    }
 
     // ===== 文件快照缓存（按文件粒度：file -> (mtime, snapshots)） =====
+    // 解析 YAML 是重 I/O 操作，只允许在异步线程触发；主线程一律读已缓存结果。
     @Volatile
     private var fileSnapshotsCache: List<ResidenceSnapshot> = emptyList()
     @Volatile
@@ -46,13 +110,27 @@ object ResidenceHook {
     @Volatile
     private var fileSnapshotsLastCheck: Long = 0L
     private val fileSnapshotEntries = ConcurrentHashMap<String, FileEntry>()
+    private val fileRefreshLock = Any()
     private const val FILE_SNAPSHOT_CHECK_INTERVAL_MS = 5000L
 
     private data class FileEntry(val mtime: Long, val snapshots: List<ResidenceSnapshot>)
 
-    fun exists(name: String): Boolean = getResidence(name) != null || fileSnapshot(name) != null
+    /**
+     * 只读内存索引 + 已缓存的文件索引，不触发任何文件 I/O，可安全用于主线程命令路径。
+     * 注意：文件缓存可能是冷的，所以「返回 false」不足以断定领地不存在。
+     * 需要确定性的否定结论时，请用 [refreshFileSnapshots] + [existsInFiles]。
+     */
+    fun exists(name: String): Boolean = getResidence(name) != null || fileSnapshotsByNameKey.containsKey(key(name))
 
+    /**
+     * 领地是否在 Residence 的内存容器中。不含文件回落，也不做文件 I/O。
+     */
     fun isLoaded(name: String): Boolean = getResidence(name) != null
+
+    /**
+     * 领地是否存在于存档文件索引中。调用前应先 [refreshFileSnapshots]（异步线程）以保证结论有效。
+     */
+    fun existsInFiles(name: String): Boolean = fileSnapshotsByNameKey.containsKey(key(name))
 
     fun getOwnerName(name: String): String? = getResidence(name)?.ownerName()
 
@@ -99,26 +177,70 @@ object ResidenceHook {
         return hasTp && hasMove
     }
 
-    fun allSnapshots(): List<ResidenceSnapshot> {
-        return try {
-            // 批量路径：直接从内存 map 取对象，避免 name -> getResidence 二次查找
-            val snapshots = residenceValues().mapNotNull { residence ->
-                val snapshot = snapshotFromResidence(residence) ?: return@mapNotNull null
-                val fileSnapshot = fileSnapshot(snapshot.nameKey)
-                snapshot.copy(teleportLocation = fileSnapshot?.teleportLocation ?: snapshot.teleportLocation)
-            }
-            snapshots.ifEmpty { fileSnapshots() }
-        } catch (_: Throwable) {
-            fileSnapshots()
+    /**
+     * 仅供异步线程调用：会按 mtime 增量重解析 Residence 的世界存档文件。
+     */
+    fun refreshFileSnapshots() {
+        fileSnapshots()
+    }
+
+    /**
+     * 用最新的文件传送点补全单条快照。调用方需保证已在异步线程（内部可能触发文件解析）。
+     */
+    fun withFileTeleportLocation(snapshot: ResidenceSnapshot): ResidenceSnapshot {
+        refreshFileSnapshots()
+        val fromFile = fileSnapshotsByNameKey[snapshot.nameKey]?.teleportLocation ?: return snapshot
+        return snapshot.copy(teleportLocation = fromFile)
+    }
+
+    /**
+     * 主线程安全：只读内存领地对象与已缓存的文件索引，不做文件 I/O。
+     */
+    fun toSnapshot(name: String): ResidenceSnapshot? {
+        val cached = fileSnapshotsByNameKey
+        val residence = getResidence(name) ?: return cached[key(name)]
+        val residenceName = residence.residenceName() ?: name
+        val snapshot = snapshotFromResidence(residence, residenceName) ?: return cached[key(name)]
+        val fromFile = cached[snapshot.nameKey]?.teleportLocation ?: return snapshot
+        return snapshot.copy(teleportLocation = fromFile)
+    }
+
+    /**
+     * 必须在主线程调用：Residence 的内存容器是普通 HashMap，异步遍历会读到撕裂状态或抛
+     * ConcurrentModificationException。这里只做「读对象 + 反射取字段」，不含文件 I/O 与数据库访问。
+     */
+    fun memorySnapshots(): List<ResidenceSnapshot> = runCatching { residenceSnapshotsFromMemory() }.getOrDefault(emptyList())
+
+    /**
+     * 仅供异步线程调用：为主线程采集到的快照补上文件里的传送点，并在文件侧为空时回落到文件快照全集。
+     */
+    fun mergeFileTeleportLocations(snapshots: List<ResidenceSnapshot>): List<ResidenceSnapshot> {
+        refreshFileSnapshots()
+        if (snapshots.isEmpty()) {
+            return fileSnapshotsCache
+        }
+        val byNameKey = fileSnapshotsByNameKey
+        if (byNameKey.isEmpty()) {
+            return snapshots
+        }
+        return snapshots.map { snapshot ->
+            val fromFile = byNameKey[snapshot.nameKey]?.teleportLocation
+            if (fromFile == null) snapshot else snapshot.copy(teleportLocation = fromFile)
         }
     }
 
-    fun toSnapshot(name: String): ResidenceSnapshot? {
-        val residence = getResidence(name) ?: return fileSnapshot(name)
-        val residenceName = residence.residenceName() ?: name
-        val snapshot = snapshotFromResidence(residence, residenceName) ?: return fileSnapshot(name)
-        val fileSnapshot = fileSnapshot(residenceName)
-        return snapshot.copy(teleportLocation = fileSnapshot?.teleportLocation ?: snapshot.teleportLocation)
+    private fun residenceSnapshotsFromMemory(): List<ResidenceSnapshot> {
+        val values = residenceValues()
+        if (values.isEmpty()) {
+            return emptyList()
+        }
+        val result = ArrayList<ResidenceSnapshot>(values.size)
+        for (residence in values) {
+            if (residence != null) {
+                snapshotFromResidence(residence)?.let { result += it }
+            }
+        }
+        return result
     }
 
     fun snapshotFromResidence(residence: Any?, nameHint: String? = null): ResidenceSnapshot? {
@@ -134,62 +256,100 @@ object ResidenceHook {
         )
     }
 
-    fun diagnostics(): List<String> {
-        val manager = residenceManager
-        val values = residenceValues()
-        val names = residenceNames()
-        val fileSnaps = fileSnapshots()
-        val allSnaps = allSnapshots()
-        return listOf(
-            "Residence plugin: ${Bukkit.getPluginManager().getPlugin("Residence")?.description?.fullName ?: "not found"}",
-            "Residence instance: ${residenceInstance?.javaClass?.name ?: "null"}",
-            "Residence manager: ${manager?.javaClass?.name ?: "null"}",
-            "Residence names: ${names.size} ${names.joinToString()}",
-            "Residence values: ${values.size}",
-            "Residence file snapshots: ${fileSnaps.size} ${fileSnaps.joinToString { it.name }}",
-            "Snapshots: ${allSnaps.size} ${allSnaps.joinToString { it.name }}"
+    /**
+     * 主线程侧的诊断数据：仅读取 Residence 内存容器。
+     */
+    fun diagnosticsMemoryPart(): DiagnosticsMemoryPart {
+        val names = runCatching { residenceNames() }.getOrDefault(emptyList())
+        return DiagnosticsMemoryPart(
+            pluginName = Bukkit.getPluginManager().getPlugin("Residence")?.description?.fullName ?: "not found",
+            instanceClass = residenceInstance?.javaClass?.name ?: "null",
+            managerClass = residenceManager?.javaClass?.name ?: "null",
+            names = names,
+            snapshots = memorySnapshots()
         )
     }
 
-    private fun fileSnapshots(): List<ResidenceSnapshot> {
-        val now = System.currentTimeMillis()
-        if (now - fileSnapshotsLastCheck < FILE_SNAPSHOT_CHECK_INTERVAL_MS) {
-            return fileSnapshotsCache
-        }
-        fileSnapshotsLastCheck = now
-        val residencePlugin = Bukkit.getPluginManager().getPlugin("Residence") ?: run {
-            clearFileSnapshotsCache()
-            return emptyList()
-        }
-        val worldsFolder = File(residencePlugin.dataFolder, "Save/Worlds")
-        if (!worldsFolder.isDirectory) {
-            clearFileSnapshotsCache()
-            return emptyList()
-        }
-        val files = worldsFolder.listFiles { file -> file.isFile && file.extension.equals("yml", ignoreCase = true) }
-            ?: emptyArray()
-        var changed = false
-        val knownNames = HashSet<String>(files.size)
-        files.forEach { file ->
-            val fileName = file.name
-            knownNames.add(fileName)
-            val mtime = file.lastModified()
-            val cached = fileSnapshotEntries[fileName]
-            if (cached == null || cached.mtime != mtime) {
-                fileSnapshotEntries[fileName] = FileEntry(mtime, snapshotsFromFile(file))
-                changed = true
-            }
-        }
-        if (fileSnapshotEntries.keys.retainAll(knownNames)) {
-            changed = true
-        }
-        if (changed) {
-            rebuildFileSnapshotIndex()
-        }
-        return fileSnapshotsCache
+    /**
+     * 异步线程侧：补齐文件快照信息并生成最终诊断文本。
+     */
+    fun diagnosticsData(memoryPart: DiagnosticsMemoryPart): DiagnosticsData {
+        val fileSnaps = fileSnapshots()
+        val allSnaps = mergeFileTeleportLocations(memoryPart.snapshots)
+        return DiagnosticsData(
+            pluginName = memoryPart.pluginName,
+            instanceClass = memoryPart.instanceClass,
+            managerClass = memoryPart.managerClass,
+            names = memoryPart.names,
+            memorySnapshotCount = memoryPart.snapshots.size,
+            fileSnapshotNames = fileSnaps.map { it.name },
+            mergedSnapshotNames = allSnaps.map { it.name }
+        )
     }
 
-    private fun cachedFileSnapshots(): List<ResidenceSnapshot> = fileSnapshotsCache
+    data class DiagnosticsData(
+        val pluginName: String,
+        val instanceClass: String,
+        val managerClass: String,
+        val names: List<String>,
+        val memorySnapshotCount: Int,
+        val fileSnapshotNames: List<String>,
+        val mergedSnapshotNames: List<String>
+    )
+
+    data class DiagnosticsMemoryPart(
+        val pluginName: String,
+        val instanceClass: String,
+        val managerClass: String,
+        val names: List<String>,
+        val snapshots: List<ResidenceSnapshot>
+    )
+
+    private fun fileSnapshots(): List<ResidenceSnapshot> {
+        if (System.currentTimeMillis() - fileSnapshotsLastCheck < FILE_SNAPSHOT_CHECK_INTERVAL_MS) {
+            return fileSnapshotsCache
+        }
+        // 单线程重解析：多个异步任务同时过期时，只有第一个真正扫盘，其余直接复用结果。
+        synchronized(fileRefreshLock) {
+            if (System.currentTimeMillis() - fileSnapshotsLastCheck < FILE_SNAPSHOT_CHECK_INTERVAL_MS) {
+                return fileSnapshotsCache
+            }
+            val residencePlugin = Bukkit.getPluginManager().getPlugin("Residence") ?: run {
+                clearFileSnapshotsCache()
+                fileSnapshotsLastCheck = System.currentTimeMillis()
+                return emptyList()
+            }
+            val worldsFolder = File(residencePlugin.dataFolder, "Save/Worlds")
+            if (!worldsFolder.isDirectory) {
+                clearFileSnapshotsCache()
+                fileSnapshotsLastCheck = System.currentTimeMillis()
+                return emptyList()
+            }
+            val files = worldsFolder.listFiles { file -> file.isFile && file.extension.equals("yml", ignoreCase = true) }
+                ?: emptyArray()
+            var changed = false
+            val knownNames = HashSet<String>(files.size)
+            files.forEach { file ->
+                val fileName = file.name
+                knownNames.add(fileName)
+                val mtime = file.lastModified()
+                val cached = fileSnapshotEntries[fileName]
+                if (cached == null || cached.mtime != mtime) {
+                    fileSnapshotEntries[fileName] = FileEntry(mtime, snapshotsFromFile(file))
+                    changed = true
+                }
+            }
+            if (fileSnapshotEntries.keys.retainAll(knownNames)) {
+                changed = true
+            }
+            if (changed) {
+                rebuildFileSnapshotIndex()
+            }
+            // 扫盘结束后再记时间戳，保证下一个窗口从「完成时刻」而不是「开始时刻」计算。
+            fileSnapshotsLastCheck = System.currentTimeMillis()
+            return fileSnapshotsCache
+        }
+    }
 
     private fun rebuildFileSnapshotIndex() {
         val snapshots = fileSnapshotEntries.values.asSequence().flatMap { it.snapshots.asSequence() }.toList()
@@ -257,37 +417,51 @@ object ResidenceHook {
         )
     }
 
-    private fun fileSnapshot(name: String): ResidenceSnapshot? {
-        fileSnapshots()
-        return fileSnapshotsByNameKey[key(name)]
-    }
-
+    /**
+     * Residence 的 getByName 是 O(1) 查找，优先走它。
+     * 只有在两条 getByName 路径都失效（API 变动）时才回落到 map 线性扫描，
+     * 并且用 key(name) 做一次规范化比较，避免为每个 entry 反复构造小写串。
+     */
     private fun getResidence(name: String): Any? {
-        val manager = residenceManager ?: return null
+        val manager = residenceManager ?: return claimedResidenceByName(name)
         proxySafe { managerProxy?.getByName(manager, name) }?.let { return it }
         manager.invokeString("getByName", name)?.let { return it }
-        val map = residencesMap()
-        map?.entries?.firstOrNull { (key, _) -> key?.toString()?.equals(name, ignoreCase = true) == true }?.value?.let { return it }
+        residenceFromMapScan(name)?.let { return it }
         return claimedResidenceByName(name)
+    }
+
+    private fun residenceFromMapScan(name: String): Any? {
+        val map = residencesMap() ?: return null
+        if (map.isEmpty()) {
+            return null
+        }
+        map[name]?.let { return it }
+        val nameKey = key(name)
+        map.forEach { (mapKey, value) ->
+            if (value != null && mapKey != null && key(mapKey.toString()) == nameKey) {
+                return value
+            }
+        }
+        return null
     }
 
     private fun claimedResidenceByName(name: String): Any? {
         proxySafe { claimedResidenceProxy?.getByName(name) }?.let { return it }
         val clazz = loadClass("com.bekvon.bukkit.residence.protection.ClaimedResidence") ?: return null
-        val method = methodCache.getOrPut("${clazz.name}#getByName(java.lang.String)") {
+        val method = methodCache.cachedOrNull<Method>("${clazz.name}#getByName(java.lang.String)") {
             runCatching { clazz.getMethod("getByName", String::class.java) }.getOrNull()
         } ?: return null
         return runCatching { method.invoke(null, name) }.getOrNull()
     }
 
-    private fun residenceValues(): Collection<Any> {
+    private fun residenceValues(): Collection<*> {
         val map = residencesMap()
         if (map != null) {
-            return map.values.filterNotNull()
+            // 直接遍历 manager 的 values 视图；调用方会跳过 null，无需每轮同步先复制一份列表。
+            return map.values
         }
-        val manager = residenceManager ?: return emptyList()
-        val collection = manager.value("getResidences", "residences") as? Collection<*>
-        return collection?.filterNotNull() ?: emptyList()
+        val manager = residenceManager ?: return emptyList<Any>()
+        return manager.value("getResidences", "residences") as? Collection<*> ?: emptyList<Any>()
     }
 
     private fun residenceNames(): List<String> {
@@ -322,7 +496,7 @@ object ResidenceHook {
     }
 
     private fun loadClass(className: String): Class<*>? {
-        return classCache.getOrPut(className) {
+        return classCache.cachedOrNull<Class<*>>(className) {
             runCatching { Class.forName(className) }.getOrNull()
                 ?: Bukkit.getPluginManager().getPlugin("Residence")?.javaClass?.classLoader?.let { loader ->
                     runCatching { loader.loadClass(className) }.getOrNull()
@@ -331,16 +505,18 @@ object ResidenceHook {
     }
 
     private fun residenceFlag(name: String): Any? {
-        return flagCache.getOrPut(name) {
-            val clazz = loadClass("com.bekvon.bukkit.residence.containers.Flags") ?: return@getOrPut null
+        return flagCache.cachedOrNull(name) {
+            val clazz = loadClass("com.bekvon.bukkit.residence.containers.Flags")
+                ?: return@cachedOrNull null
             runCatching { clazz.getField(name).get(null) }.getOrNull()
                 ?: runCatching { clazz.getMethod("getFlag", String::class.java).invoke(null, name) }.getOrNull()
         }
     }
 
     private fun residenceFlagCombo(name: String): Any? {
-        return flagComboCache.getOrPut(name) {
-            val clazz = loadClass("com.bekvon.bukkit.residence.protection.FlagPermissions\$FlagCombo") ?: return@getOrPut null
+        return flagComboCache.cachedOrNull(name) {
+            val clazz = loadClass("com.bekvon.bukkit.residence.protection.FlagPermissions\$FlagCombo")
+                ?: return@cachedOrNull null
             runCatching { clazz.getField(name).get(null) }.getOrNull()
                 ?: runCatching { clazz.getMethod("valueOf", String::class.java).invoke(null, name) }.getOrNull()
         }
@@ -431,7 +607,7 @@ object ResidenceHook {
 
     private fun Any.method(name: String, vararg parameterTypes: Class<*>): Method? {
         val key = methodKey(javaClass, name, parameterTypes)
-        return methodCache.getOrPut(key) { resolveMethod(javaClass, name, parameterTypes) }
+        return methodCache.cachedOrNull(key) { resolveMethod(javaClass, name, parameterTypes) }
     }
 
     private fun resolveMethod(clazz: Class<*>, name: String, parameterTypes: Array<out Class<*>>): Method? {
@@ -458,7 +634,7 @@ object ResidenceHook {
 
     private fun Any.field(name: String): Field? {
         val key = "${javaClass.name}#$name"
-        return fieldCache.getOrPut(key) { resolveField(javaClass, name) }
+        return fieldCache.cachedOrNull(key) { resolveField(javaClass, name) }
     }
 
     private fun resolveField(clazz: Class<*>, name: String): Field? {

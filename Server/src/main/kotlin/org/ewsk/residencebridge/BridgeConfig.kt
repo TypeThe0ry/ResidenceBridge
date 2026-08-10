@@ -21,7 +21,8 @@ data class BridgeConfig(
     val placeholderCacheSeconds: Long,
     val velocityChannel: String,
     val fallbackBungeeChannel: Boolean,
-    val messages: Messages
+    val serverStatusTimeoutTicks: Long,
+    val language: LanguageConfig
 ) {
     companion object {
         fun load(configFile: File): BridgeConfig {
@@ -60,11 +61,7 @@ data class BridgeConfig(
                 ),
                 list = ListConfig(
                     pageSize = doc.getOrDefault(Int::class.java, 8, "list", "page-size").coerceAtLeast(1),
-                    othersPermission = doc.getOrDefault(String::class.java, "residencebridge.list.others", "list", "others-permission"),
-                    header = doc.message("list", "header", default = "&6你的全区领地列表 &7(&f%count%&7) &8- &7第 &f%page%&7/&f%max_page% &7页"),
-                    otherHeader = doc.message("list", "other-header", default = "&6%target% 的全区领地列表 &7(&f%count%&7) &8- &7第 &f%page%&7/&f%max_page% &7页"),
-                    line = doc.message("list", "line", default = "&7- &a%name% &8[&f%server%&8]"),
-                    empty = doc.message("list", "empty", default = "&e你还没有任何领地。")
+                    othersPermission = doc.getOrDefault(String::class.java, "residencebridge.list.others", "list", "others-permission")
                 ),
                 remoteActionCommands = doc.getSequenceOrNull("remote-action-commands")
                     ?.value()
@@ -76,24 +73,12 @@ data class BridgeConfig(
                 placeholderCacheSeconds = doc.getOrDefault(Long::class.java, 30L, "placeholder", "cache-seconds").coerceAtLeast(1L),
                 velocityChannel = doc.getOrDefault(String::class.java, "residencebridge:main", "velocity", "channel"),
                 fallbackBungeeChannel = doc.getOrDefault(Boolean::class.java, true, "velocity", "fallback-bungee-channel"),
-                messages = Messages(
-                    duplicate = doc.message("messages", "duplicate", default = "&c全服已存在同名领地：&f%name%"),
-                    notFound = doc.message("messages", "not-found", default = "&c没有找到这个领地：&f%name%"),
-                    switching = doc.message("messages", "switching", default = "&a正在传送到领地所在服务器：&f%server%"),
-                    localTeleportFailed = doc.message("messages", "local-teleport-failed", default = "&c你没有权限执行这个操作。"),
-                    connectRequestFailed = doc.message("messages", "connect-request-failed", default = "&c跨服传送请求失败，请稍后再试。"),
-                    limitReached = doc.message("messages", "limit-reached", default = "&c你的全区领地数量已达上限：&f%count%/%max%"),
-                    teleportWait = doc.message("messages", "teleport-wait", default = "&a传送将在 &f%seconds% &a秒后开始，请不要移动。"),
-                    teleportCancelled = doc.message("messages", "teleport-cancelled", default = "&c传送已取消。"),
-                    remoteActionSwitching = doc.message("messages", "remote-action-switching", default = "&a正在切换到领地所在服务器执行指令：&f%server%"),
-                    remoteActionQueued = doc.message("messages", "remote-action-queued", default = "&a已到达目标服务器，正在执行指令。"),
-                    noPermission = doc.message("messages", "no-permission", default = "&c你没有权限执行这个操作。")
+                serverStatusTimeoutTicks = doc.getOrDefault(Long::class.java, 60L, "velocity", "server-status-timeout-ticks").coerceAtLeast(20L),
+                language = LanguageConfig(
+                    defaultLocale = doc.getOrDefault(String::class.java, "zh_CN", "language", "default-locale"),
+                    followClient = doc.getOrDefault(Boolean::class.java, true, "language", "follow-client")
                 )
             )
-        }
-
-        private fun YamlDocument.message(vararg path: String, default: String): String {
-            return MessageUtil.color(getOrDefault(String::class.java, default, *path))
         }
 
         private fun YamlDocument.permissionIntRules(vararg path: String, valueKey: String): List<PermissionIntRule> {
@@ -158,23 +143,10 @@ data class ResidenceLimitConfig(
 
 data class ListConfig(
     val pageSize: Int,
-    val othersPermission: String,
-    val header: String,
-    val otherHeader: String,
-    val line: String,
-    val empty: String
+    val othersPermission: String
 )
 
-data class Messages(
-    val duplicate: String,
-    val notFound: String,
-    val switching: String,
-    val localTeleportFailed: String,
-    val connectRequestFailed: String,
-    val limitReached: String,
-    val teleportWait: String,
-    val teleportCancelled: String,
-    val remoteActionSwitching: String,
-    val remoteActionQueued: String,
-    val noPermission: String
+data class LanguageConfig(
+    val defaultLocale: String,
+    val followClient: Boolean
 )

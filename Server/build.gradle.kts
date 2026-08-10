@@ -29,6 +29,7 @@ dependencies {
     implementation("net.momirealms:sparrow-yaml:1.0.12")
 
     testImplementation(kotlin("test-junit"))
+    testImplementation("io.papermc.paper:paper-api:1.20.4-R0.1-SNAPSHOT")
 }
 
 tasks.withType<JavaCompile> {
