@@ -4,7 +4,6 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
 plugins {
     java
     id("org.jetbrains.kotlin.jvm") version "2.2.0"
-    id("com.gradleup.shadow") version "9.4.1"
 }
 
 repositories {
@@ -49,21 +48,5 @@ java {
 }
 
 tasks.jar {
-    enabled = false
-}
-
-tasks.shadowJar {
     archiveBaseName.set("ResidenceBridge")
-    archiveClassifier.set("")
-    mergeServiceFiles()
-    relocate("com.zaxxer.hikari", "org.ewsk.residencebridge.lib.hikari")
-    relocate("com.mysql", "org.ewsk.residencebridge.lib.mysql")
-    relocate("net.momirealms.sparrow.reflection", "org.ewsk.residencebridge.lib.reflection")
-    relocate("org.objectweb.asm", "org.ewsk.residencebridge.lib.asm")
-    relocate("net.momirealms.sparrow.yaml", "org.ewsk.residencebridge.lib.yaml")
-    relocate("org.snakeyaml", "org.ewsk.residencebridge.lib.snakeyaml")
-}
-
-tasks.build {
-    dependsOn(tasks.shadowJar)
 }

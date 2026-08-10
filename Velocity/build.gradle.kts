@@ -4,7 +4,6 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21
 plugins {
     java
     id("org.jetbrains.kotlin.jvm") version "2.2.0"
-    id("com.gradleup.shadow") version "9.4.1"
 }
 
 repositories {
@@ -14,9 +13,10 @@ repositories {
 
 dependencies {
     compileOnly("com.velocitypowered:velocity-api:3.5.0-SNAPSHOT")
-    implementation(kotlin("stdlib"))
+    compileOnly(kotlin("stdlib"))
 
     testImplementation(kotlin("test-junit"))
+    testImplementation(kotlin("stdlib"))
 }
 
 tasks.withType<JavaCompile> {
@@ -36,15 +36,5 @@ java {
 }
 
 tasks.jar {
-    enabled = false
-}
-
-tasks.shadowJar {
     archiveBaseName.set("ResidenceBridge-Velocity")
-    archiveClassifier.set("")
-    mergeServiceFiles()
-}
-
-tasks.build {
-    dependsOn(tasks.shadowJar)
 }
