@@ -43,6 +43,8 @@ object BridgePlugin {
     private val pendingArrivalTeleports = ConcurrentHashMap<UUID, String>()
     private val residenceEventListener = object : Listener {}
     private val commandOverrideListener = object : Listener {}
+    private val teleportWaitListener = object : Listener {}
+    private var teleportWaitListenerRegistered = false
     private val handledCommandEvents = Collections.synchronizedMap(WeakHashMap<PlayerCommandPreprocessEvent, Boolean>())
     private val originalResidenceCommands = ConcurrentHashMap<String, Command>()
     private var residenceEventsRegistered = false
@@ -122,6 +124,8 @@ object BridgePlugin {
         commandOverrideRegistered = false
         HandlerList.unregisterAll(residenceEventListener)
         residenceEventsRegistered = false
+        HandlerList.unregisterAll(teleportWaitListener)
+        teleportWaitListenerRegistered = false
         PlaceholderBridge.unregister()
         if (::messenger.isInitialized) {
             messenger.unregister()
@@ -250,11 +254,8 @@ object BridgePlugin {
         }
     }
 
-    @SubscribeEvent
-    fun onMove(event: PlayerMoveEvent) {
-        if (!config.teleportWait.cancelOnMove) {
-            return
-        }
+    private fun handleMove(event: PlayerMoveEvent) {
+        if (waitingTeleports.isEmpty()) return
         val waiting = waitingTeleports[event.player.uniqueId] ?: return
         val to = event.to ?: return
         if (waiting.worldName != to.world?.name || waiting.x != to.blockX || waiting.y != to.blockY || waiting.z != to.blockZ) {
@@ -262,11 +263,8 @@ object BridgePlugin {
         }
     }
 
-    @SubscribeEvent
-    fun onDamage(event: EntityDamageEvent) {
-        if (!config.teleportWait.cancelOnDamage) {
-            return
-        }
+    private fun handleDamage(event: EntityDamageEvent) {
+        if (waitingTeleports.isEmpty()) return
         val player = event.entity as? Player ?: return
         if (waitingTeleports.containsKey(player.uniqueId)) {
             cancelWaitingTeleport(player)
@@ -277,6 +275,7 @@ object BridgePlugin {
     fun onQuit(event: PlayerQuitEvent) {
         waitingTeleports.remove(event.player.uniqueId)?.cancelTasks()
         pendingArrivalTeleports.remove(event.player.uniqueId)
+        unregisterTeleportWaitListenerIfEmpty()
     }
 
     private fun handleList(event: PlayerCommandPreprocessEvent, parsed: ParsedResidenceCommand) {
@@ -448,6 +447,7 @@ object BridgePlugin {
         val waiting = WaitingTeleport(entry, location.world?.name, location.blockX, location.blockY, location.blockZ)
         waitingTeleports.remove(player.uniqueId)?.cancelTasks()
         waitingTeleports[player.uniqueId] = waiting
+        ensureTeleportWaitListenerRegistered()
         for (remaining in seconds downTo 1) {
             val delay = (seconds - remaining) * 20L
             waiting.tasks += runPlayer(player, delay) {
@@ -463,12 +463,14 @@ object BridgePlugin {
                 active.cancelTasks()
                 executeTeleport(player, entry)
             }
+            unregisterTeleportWaitListenerIfEmpty()
         }
     }
 
     private fun cancelWaitingTeleport(player: Player) {
         waitingTeleports.remove(player.uniqueId)?.cancelTasks() ?: return
         player.sendMessage(config.messages.teleportCancelled)
+        unregisterTeleportWaitListenerIfEmpty()
     }
 
     private fun executeTeleport(player: Player, entry: ResidenceIndexEntry) {
@@ -898,6 +900,38 @@ object BridgePlugin {
             )
         }
         residenceEventsRegistered = true
+    }
+
+    private fun ensureTeleportWaitListenerRegistered() {
+        if (teleportWaitListenerRegistered) return
+        if (config.teleportWait.cancelOnMove) {
+            Bukkit.getPluginManager().registerEvent(
+                PlayerMoveEvent::class.java,
+                teleportWaitListener,
+                BukkitEventPriority.MONITOR,
+                EventExecutor { _, event -> handleMove(event as PlayerMoveEvent) },
+                plugin,
+                false
+            )
+        }
+        if (config.teleportWait.cancelOnDamage) {
+            Bukkit.getPluginManager().registerEvent(
+                EntityDamageEvent::class.java,
+                teleportWaitListener,
+                BukkitEventPriority.MONITOR,
+                EventExecutor { _, event -> handleDamage(event as EntityDamageEvent) },
+                plugin,
+                false
+            )
+        }
+        teleportWaitListenerRegistered = true
+    }
+
+    private fun unregisterTeleportWaitListenerIfEmpty() {
+        if (!teleportWaitListenerRegistered) return
+        if (waitingTeleports.isNotEmpty()) return
+        HandlerList.unregisterAll(teleportWaitListener)
+        teleportWaitListenerRegistered = false
     }
 
     private fun handleResidenceEvent(event: Event) {
