@@ -25,11 +25,11 @@ jobs:
       - name: Validate Gradle wrappers
         uses: gradle/actions/wrapper-validation@v6
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: 17
+          java-version: 21
           cache: gradle
 
       - name: Read project version
