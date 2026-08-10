@@ -28,6 +28,21 @@ class CompletionMergeTest {
     }
 
     @Test
+    fun `keeps native sub-residences for teleport commands`() {
+        val nativeSuggestions = listOf("parent.child")
+        val bridgeSuggestions = listOf("parent", "remote")
+
+        assertEquals(
+            listOf("parent", "parent.child", "remote"),
+            combineTabCompletions("tp", nativeSuggestions, bridgeSuggestions)
+        )
+        assertEquals(
+            listOf("parent", "parent.child", "remote"),
+            combineTabCompletions("teleport", nativeSuggestions, bridgeSuggestions)
+        )
+    }
+
+    @Test
     fun `keeps list completion bridge-only to preserve its permission boundary`() {
         val nativeSuggestions = listOf("anotherPlayer", "world")
         val bridgeSuggestions = listOf("permittedOwner")

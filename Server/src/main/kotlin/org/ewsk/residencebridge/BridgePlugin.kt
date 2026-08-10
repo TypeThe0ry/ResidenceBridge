@@ -407,24 +407,22 @@ object BridgePlugin {
         event.isCancelled = true
         val localSnapshot = ResidenceHook.toSnapshot(residenceName)
         if (localSnapshot != null) {
-            startTeleport(
-                player,
-                ResidenceIndexEntry(
-                    nameKey = localSnapshot.nameKey,
-                    displayName = localSnapshot.name,
-                    serverId = config.serverId,
-                    worldName = localSnapshot.worldName,
-                    ownerUuid = localSnapshot.ownerUuid,
-                    ownerName = localSnapshot.ownerName,
-                    updatedAt = System.currentTimeMillis(),
-                    teleportLocation = localSnapshot.teleportLocation
-                )
+            val entry = ResidenceIndexEntry(
+                nameKey = localSnapshot.nameKey,
+                displayName = localSnapshot.name,
+                serverId = config.serverId,
+                worldName = localSnapshot.worldName,
+                ownerUuid = localSnapshot.ownerUuid,
+                ownerName = localSnapshot.ownerName,
+                updatedAt = System.currentTimeMillis(),
+                teleportLocation = localSnapshot.teleportLocation
             )
+            startTeleport(player, entry.forTargetResidence(residenceName))
             runAsync { database.upsertSnapshot(localSnapshot) }
             return
         }
         runAsync {
-            val entry = database.findIndex(residenceName)
+            val entry = findIndexedResidenceRoute(residenceName)
             if (entry == null) {
                 player.sendBridgeMessage(MessageUtil.apply(config.messages.notFound, mapOf("name" to residenceName)))
                 return@runAsync
@@ -514,7 +512,7 @@ object BridgePlugin {
         }
 
         runAsync {
-            val entry = database.findIndex(oldName)
+            val entry = findIndexedResidenceRoute(oldName)
             if (entry == null) {
                 player.sendBridgeMessage(MessageUtil.apply(config.messages.notFound, mapOf("name" to oldName)))
                 return@runAsync
@@ -574,7 +572,7 @@ object BridgePlugin {
         }
         event.isCancelled = true
         runAsync {
-            val entry = database.findIndex(targetResidence)
+            val entry = findIndexedResidenceRoute(targetResidence)
             if (entry == null) {
                 player.sendBridgeMessage(MessageUtil.apply(config.messages.notFound, mapOf("name" to targetResidence)))
                 return@runAsync
@@ -595,6 +593,10 @@ object BridgePlugin {
         val expireAt = System.currentTimeMillis() + config.pendingExpireSeconds * 1000L
         database.writePendingAction(player.uniqueId, player.name, parsed.subCommand, parsed.rawCommand, entry.displayName, entry.serverId, expireAt)
         runPlayer(player) { connectToServer(player, entry.serverId, config.messages.remoteActionSwitching) }
+    }
+
+    private fun findIndexedResidenceRoute(name: String): ResidenceIndexEntry? {
+        return findResidenceIndexRoute(name) { database.findIndex(it) }
     }
 
     private fun executePendingAction(player: Player, action: PendingAction) {
@@ -1082,7 +1084,9 @@ object BridgePlugin {
 }
 
 private val commandsWithNativeResidenceCompletions = setOf(
-    "remove"
+    "remove",
+    "tp",
+    "teleport"
 )
 
 internal fun combineTabCompletions(

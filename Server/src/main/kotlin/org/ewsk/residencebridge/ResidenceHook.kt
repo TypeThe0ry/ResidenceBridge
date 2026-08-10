@@ -182,7 +182,14 @@ object ResidenceHook {
         val manager = residenceManager() ?: return null
         manager.invokeString("getByName", name)?.let { return it }
         val map = residencesMap()
-        map?.entries?.firstOrNull { (key, _) -> key?.toString()?.equals(name, ignoreCase = true) == true }?.value?.let { return it }
+        findResidenceByPath(
+            name,
+            rootLookup = { rootName ->
+                manager.invokeString("getByName", rootName)
+                    ?: map?.entries?.firstOrNull { (key, _) -> key?.toString()?.equals(rootName, ignoreCase = true) == true }?.value
+            },
+            childLookup = { parent, childName -> parent.invokeString("getSubzone", childName) }
+        )?.let { return it }
         return claimedResidenceByName(name)
     }
 
