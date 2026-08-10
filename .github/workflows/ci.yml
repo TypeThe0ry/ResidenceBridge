@@ -1,4 +1,4 @@
-name: Build and Release
+name: Build and Upload
 
 on:
   push:
@@ -9,11 +9,8 @@ on:
   pull_request:
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 concurrency:
-  group: build-and-release-${{ github.ref }}
+  group: build-and-upload-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -52,19 +49,6 @@ jobs:
             echo "Server:   $server_version" >&2
             echo "Velocity: $velocity_version" >&2
             exit 1
-          fi
-
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            tag_version="${GITHUB_REF_NAME#v}"
-
-            if [ "$tag_version" != "$server_version" ]; then
-              echo "Tag version does not match gradle.properties version" >&2
-              echo "Tag version:      $tag_version" >&2
-              echo "Project version:  $server_version" >&2
-              echo "" >&2
-              echo "Fix one of them before publishing release." >&2
-              exit 1
-            fi
           fi
 
           echo "version=$server_version" >> "$GITHUB_OUTPUT"
@@ -120,27 +104,3 @@ jobs:
           name: ResidenceBridge-${{ steps.version.outputs.version }}-${{ github.run_number }}
           path: dist/*.jar
           if-no-files-found: error
-
-      - name: Publish version release
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-        uses: ncipollo/release-action@v1
-        with:
-          tag: ${{ github.ref_name }}
-          name: ResidenceBridge ${{ github.ref_name }}
-          body: |
-            ResidenceBridge ${{ github.ref_name }}
-
-            ## Artifacts
-
-            - `ResidenceBridge-${{ steps.version.outputs.version }}.jar`
-            - `ResidenceBridge-Velocity-${{ steps.version.outputs.version }}.jar`
-
-            ## Build Info
-
-            - Version: `${{ steps.version.outputs.version }}`
-            - Tag: `${{ github.ref_name }}`
-            - Commit: `${{ github.sha }}`
-          artifacts: "dist/*.jar"
-          allowUpdates: false
-          generateReleaseNotes: true
-          token: ${{ secrets.GITHUB_TOKEN }}
