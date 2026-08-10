@@ -2,12 +2,27 @@
 
 English version: [README.md](README.md)
 
-> 跨服领地桥接插件，让 [Residence](https://www.spigotmc.org/resources/residence.11480/) 在 Velocity / BungeeCord 多服网络中共享领地索引、跨服传送和全区限制。
+> 对上游 ResidenceBridge 狗屎一样的性能进行全面重写的版本。让 [Residence](https://www.spigotmc.org/resources/residence.11480/) 在 Velocity / BungeeCord 多服网络中共享领地索引、跨服传送和全区限制。
 
-[![Server Java](https://img.shields.io/badge/Server-Java%208%2B-orange.svg)](https://adoptium.net)
+[![Server Java](https://img.shields.io/badge/Server-Java%2017%2B-orange.svg)](https://adoptium.net)
 [![Velocity Java](https://img.shields.io/badge/Velocity-Java%2017%2B-orange.svg)](https://adoptium.net)
 [![Minecraft](https://img.shields.io/badge/Minecraft-1.16%2B-brightgreen.svg)](https://papermc.io)
 
+
+## 本分支改动
+
+这个分支不是在上游基础上简单堆功能，而是把上游的代码整体重写了一遍：
+
+- **彻底移除 TabooLib 运行时**：上游打包了一整套重型框架依赖；本分支改为独立的 fat-jar，只带真正用到的库（HikariCP、MySQL Connector、SnakeYAML），并 relocate 到自己的包名下避免冲突。
+- **扔掉已死的 ptms.ink 核心依赖**：上游对着一个没人维护的私有 API core 编译；本分支直接基于 Paper API / Velocity API 构建（JDK 17）。
+- **MySQL 同步大幅提速**：快照收集移出主线程、批量 upsert（`rewriteBatchedStatements`）、删除分批执行、补上缺失的索引、去掉依赖 `LOWER()` 的慢查询。
+- **运行时查询大幅减少**：合并 onJoin 查询、占位符改为单查询异步取数、文件快照按文件粒度缓存。
+- **更干净的 Residence 交互**：上游用脆弱的代码硬撬 Residence 内部 API；本分支用缓存了方法的反射代理（`ReflectionProxies.kt`），跨版本兼容更稳。
+- **主线程负载更轻**：快照收集、写库、占位符取数都不再占用服务器主线程；玩家任务适配 Folia 调度。
+- **规范的插件描述文件**：补上真正的 `plugin.yml`（`depend: Residence`、`softdepend: PlaceholderAPI`、完整权限节点）和 `velocity-plugin.json`。
+- **CI 只做构建和上传**：不再自动发布 Release。
+
+详细优化项见提交历史。
 
 ## 功能
 

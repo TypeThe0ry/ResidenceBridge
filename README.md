@@ -2,11 +2,26 @@
 
 中文: [README_CN.md](README_CN.md)
 
-> Cross-server Residence bridge for sharing [Residence](https://www.spigotmc.org/resources/residence.11480/) data, teleport requests, and global limits across a Velocity / BungeeCord network.
+> A full rewrite of the upstream ResidenceBridge that fixes its terrible performance and poor design. Shares [Residence](https://www.spigotmc.org/resources/residence.11480/) data, teleport requests, and global limits across a Velocity / BungeeCord network.
 
-[![Java](https://img.shields.io/badge/Server-Java%208%2B-orange.svg)](https://adoptium.net)
+[![Java](https://img.shields.io/badge/Server-Java%2017%2B-orange.svg)](https://adoptium.net)
 [![Minecraft](https://img.shields.io/badge/Minecraft-1.16%2B-brightgreen.svg)](https://papermc.io)
 
+
+## What this fork changes
+
+This fork rewrites the upstream codebase instead of piling features on top of it:
+
+- **Removed the whole TabooLib runtime** — upstream shipped a heavy framework dependency; this fork ships standalone fat-jars containing only what it actually uses (HikariCP, MySQL Connector, SnakeYAML), relocated into its own package to avoid conflicts.
+- **Dropped the dead `ptms.ink` core dependency** — upstream compiled against an unmaintained private API core; this fork builds directly against Paper API / Velocity API on JDK 17.
+- **Much faster MySQL sync** — snapshots are collected off the main thread, written with batched upserts (`rewriteBatchedStatements`), deletes are chunked, missing indexes were added, and slow `LOWER()`-heavy queries were removed.
+- **Fewer queries at runtime** — `onJoin` lookups were merged, placeholders fetch data asynchronously in a single query, and file snapshots are cached per file.
+- **Cleaner Residence interaction** — upstream poked Residence internals with fragile code; this fork uses cached reflection proxies (`ReflectionProxies.kt`) so it stays compatible across Residence versions.
+- **Less main-thread work** — snapshot collection, database writes and placeholder fetches no longer block the server thread, and player tasks respect Folia scheduling.
+- **Proper plugin descriptors** — a real `plugin.yml` (`depend: Residence`, `softdepend: PlaceholderAPI`, permission nodes) and a `velocity-plugin.json`.
+- **CI builds and uploads artifacts only** — no more auto-publishing releases.
+
+See the commit history for the full breakdown of the optimizations.
 
 ## Features
 
