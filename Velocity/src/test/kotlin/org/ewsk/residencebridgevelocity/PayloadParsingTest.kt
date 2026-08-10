@@ -2,6 +2,8 @@ package org.ewsk.residencebridgevelocity
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertIs
+import kotlin.test.assertNull
 
 /**
  * 插件消息载荷解析测试。
@@ -72,5 +74,23 @@ class PayloadParsingTest {
     fun `rejects names containing control characters`() {
         assertEquals("", parse("connect|survival\u0000"))
         assertEquals("", parse("connect|surv\u0007ival"))
+    }
+
+    @Test
+    fun `parses status and acknowledged connect requests`() {
+        val status = assertIs<ProxyRequest.Status>(parseProxyRequest("status|req-1|creative".encodeToByteArray()))
+        assertEquals("req-1", status.requestId)
+        assertEquals("creative", status.targetServer)
+        val connect = assertIs<ProxyRequest.Connect>(parseProxyRequest("connect|req-2|survival".encodeToByteArray()))
+        assertEquals("req-2", connect.requestId)
+        assertEquals("survival", connect.targetServer)
+    }
+
+    @Test
+    fun `rejects malformed protocol tokens and extra fields`() {
+        assertNull(parseProxyRequest("status||creative".encodeToByteArray()))
+        assertNull(parseProxyRequest("status|bad id|creative".encodeToByteArray()))
+        assertNull(parseProxyRequest("connect|id|survival|extra".encodeToByteArray()))
+        assertNull(parseProxyRequest(ByteArray(MAX_PAYLOAD_BYTES + 1)))
     }
 }

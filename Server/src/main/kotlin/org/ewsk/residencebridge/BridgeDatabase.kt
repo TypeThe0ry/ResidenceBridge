@@ -422,6 +422,19 @@ class BridgeDatabase(private val config: BridgeConfig) {
         }
     }
 
+    fun deletePendingTransfer(playerUuid: UUID, targetServer: String) = connection().use { conn ->
+        conn.prepareStatement("DELETE FROM residence_bridge_pending_tp WHERE player_uuid=? AND target_server=?").use { ps ->
+            ps.setString(1, playerUuid.toString())
+            ps.setString(2, targetServer)
+            ps.executeUpdate()
+        }
+        conn.prepareStatement("DELETE FROM residence_bridge_pending_action WHERE player_uuid=? AND target_server=?").use { ps ->
+            ps.setString(1, playerUuid.toString())
+            ps.setString(2, targetServer)
+            ps.executeUpdate()
+        }
+    }
+
     fun consumePending(playerUuid: UUID): PendingTeleport? = connection().use { conn ->
         conn.autoCommit = false
         try {

@@ -19,6 +19,7 @@ data class BridgeConfig(
     val placeholderCacheSeconds: Long,
     val velocityChannel: String,
     val fallbackBungeeChannel: Boolean,
+    val serverStatusTimeoutTicks: Long,
     val messages: Messages
 ) {
     companion object {
@@ -69,6 +70,7 @@ data class BridgeConfig(
                 placeholderCacheSeconds = config.getLong("placeholder.cache-seconds", 30L).coerceAtLeast(1L),
                 velocityChannel = config.getString("velocity.channel", "residencebridge:main")!!,
                 fallbackBungeeChannel = config.getBoolean("velocity.fallback-bungee-channel", true),
+                serverStatusTimeoutTicks = config.getLong("velocity.server-status-timeout-ticks", 60L).coerceAtLeast(1L),
                 messages = Messages(
                     duplicate = config.message("messages.duplicate", "&c全服已存在同名领地：&f%name%"),
                     notFound = config.message("messages.not-found", "&c没有找到这个领地：&f%name%"),
@@ -80,7 +82,10 @@ data class BridgeConfig(
                     teleportCancelled = config.message("messages.teleport-cancelled", "&c传送已取消。"),
                     remoteActionSwitching = config.message("messages.remote-action-switching", "&a正在切换到领地所在服务器执行指令：&f%server%"),
                     remoteActionQueued = config.message("messages.remote-action-queued", "&a已到达目标服务器，正在执行指令。"),
-                    noPermission = config.message("messages.no-permission", "&c你没有权限执行这个操作。")
+                    noPermission = config.message("messages.no-permission", "&c你没有权限执行这个操作。"),
+                    serverNotFound = config.message("messages.server-not-found", "&c目标服务器不存在：&f%server%"),
+                    serverOffline = config.message("messages.server-offline", "&c目标服务器当前离线：&f%server%"),
+                    statusUnavailable = config.message("messages.status-unavailable", "&c暂时无法确认目标服务器状态，请稍后再试。")
                 )
             )
         }
@@ -168,5 +173,8 @@ data class Messages(
     val teleportCancelled: String,
     val remoteActionSwitching: String,
     val remoteActionQueued: String,
-    val noPermission: String
+    val noPermission: String,
+    val serverNotFound: String,
+    val serverOffline: String,
+    val statusUnavailable: String
 )

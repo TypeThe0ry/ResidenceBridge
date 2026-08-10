@@ -105,6 +105,8 @@ velocity:
   # 是否同时发送 BungeeCord 格式的连接消息
   # 使用 BungeeCord 代理时请保持 true；纯 Velocity 环境可设为 false
   fallback-bungee-channel: true
+  # 等待代理确认目标服务器状态的最长时间（tick）
+  server-status-timeout-ticks: 60
 
 # ─── 玩家提示消息 ────────────────────────────────
 # 支持 & 颜色代码，可用占位符：%name%（领地名）、%server%（服务器名）
@@ -120,3 +122,6 @@ messages:
   remote-action-switching: "&a正在切换到领地所在服务器执行指令：&f%server%"
   remote-action-queued: "&a已到达目标服务器，正在执行指令。"
   no-permission: "&c你没有权限执行这个操作。"
+  server-not-found: "&c目标服务器不存在：&f%server%"
+  server-offline: "&c目标服务器当前离线：&f%server%"
+  status-unavailable: "&c暂时无法确认目标服务器状态，请稍后再试。"
