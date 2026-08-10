@@ -3,14 +3,19 @@ package org.ewsk.residencebridge
 import org.bukkit.Bukkit
 import org.bukkit.Location
 import org.bukkit.World
+import org.bukkit.configuration.ConfigurationSection
 import org.bukkit.configuration.file.YamlConfiguration
 import org.bukkit.entity.Player
 import java.io.File
+import java.lang.invoke.MethodHandles
+import java.lang.invoke.MethodType
 import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.util.UUID
 
 object ResidenceHook {
+
+    private var residenceManagerFailure: String? = null
 
     fun exists(name: String): Boolean = getResidence(name) != null || fileSnapshot(name) != null
 
@@ -55,19 +60,16 @@ object ResidenceHook {
     }
 
     fun allSnapshots(): List<ResidenceSnapshot> {
+        val fileSnapshots = runCatching { fileSnapshots() }.getOrDefault(emptyList())
         return try {
-            val names = residenceNames()
-            val snapshots = if (names.isNotEmpty()) {
-                names.mapNotNull { toSnapshot(it) }
-            } else {
-                residenceValues().mapNotNull { residence ->
-                    val residenceName = residence.residenceName() ?: return@mapNotNull null
-                    toSnapshot(residenceName)
-                }
+            val fileSnapshotsByKey = fileSnapshots.associateBy { it.nameKey }
+            val roots = residenceValues().ifEmpty {
+                residenceNames().mapNotNull { getResidence(it) }
             }
-            snapshots.ifEmpty { fileSnapshots() }
+            val snapshots = roots.flatMap { residenceSnapshots(it, fileSnapshotsByKey) }
+            snapshots.ifEmpty { fileSnapshots }
         } catch (_: Throwable) {
-            fileSnapshots()
+            fileSnapshots
         }
     }
 
@@ -92,6 +94,21 @@ object ResidenceHook {
         )
     }
 
+    private fun residenceSnapshots(
+        residence: Any,
+        fileSnapshotsByKey: Map<String, ResidenceSnapshot>
+    ): List<ResidenceSnapshot> {
+        val snapshot = snapshotFromResidence(residence) ?: return emptyList()
+        val fileSnapshot = fileSnapshotsByKey[snapshot.nameKey]
+        val current = snapshot.copy(teleportLocation = fileSnapshot?.teleportLocation)
+        val children = when (val value = residence.invokeNoArg("getSubzones")) {
+            is Iterable<*> -> value.filterNotNull()
+            is Array<*> -> value.filterNotNull()
+            else -> emptyList()
+        }
+        return listOf(current) + children.flatMap { residenceSnapshots(it, fileSnapshotsByKey) }
+    }
+
     fun diagnostics(): List<String> {
         val manager = residenceManager()
         val values = residenceValues()
@@ -101,6 +118,7 @@ object ResidenceHook {
             "Residence plugin: ${Bukkit.getPluginManager().getPlugin("Residence")?.description?.fullName ?: "not found"}",
             "Residence instance: ${residenceInstance()?.javaClass?.name ?: "null"}",
             "Residence manager: ${manager?.javaClass?.name ?: "null"}",
+            "Residence manager failure: ${residenceManagerFailure ?: "none"}",
             "Residence names: ${names.size} ${names.joinToString()}",
             "Residence values: ${values.size}",
             "Residence file snapshots: ${fileSnapshots.size} ${fileSnapshots.joinToString { it.name }}",
@@ -121,23 +139,42 @@ object ResidenceHook {
 
     private fun snapshotsFromFile(file: File): List<ResidenceSnapshot> {
         val configuration = YamlConfiguration.loadConfiguration(file)
-        val residences = configuration.getConfigurationSection("Residences") ?: return emptyList()
         val worldName = file.name.removePrefix("res_").removeSuffix(".yml")
-        return residences.getKeys(false).map { name ->
-            val path = "Residences.$name.Permissions"
-            val area = configuration.getString("Residences.$name.Areas.main")
-            val tpLocation = configuration.getString("Residences.$name.TPLoc")
-            ResidenceSnapshot(
-                name = name,
-                ownerUuid = configuration.getString("$path.OwnerUUID")?.let { value ->
-                    runCatching { UUID.fromString(value) }.getOrNull()
-                },
-                ownerName = configuration.getString("$path.OwnerLastKnownName"),
-                worldName = worldName.takeIf { it.isNotBlank() },
-                teleportLocation = tpLocation?.let { parseTeleportLocation(worldName, it) }
-                    ?: area?.let { parseAreaCenter(worldName, it) }
-            )
+        return snapshotsFromConfiguration(configuration, worldName)
+    }
+
+    internal fun snapshotsFromConfiguration(
+        configuration: YamlConfiguration,
+        worldName: String
+    ): List<ResidenceSnapshot> {
+        val residences = configuration.getConfigurationSection("Residences") ?: return emptyList()
+        val roots = residences.getKeys(false).mapNotNull { name ->
+            residences.getConfigurationSection(name)?.let { name to it }
         }
+        return flattenResidenceTree(roots) { section ->
+            val subzones = section.getConfigurationSection("Subzones") ?: return@flattenResidenceTree emptyList()
+            subzones.getKeys(false).mapNotNull { name -> subzones.getConfigurationSection(name)?.let { name to it } }
+        }.map { (name, section) -> residenceSnapshotFromSection(section, name, worldName) }
+    }
+
+    private fun residenceSnapshotFromSection(
+        section: ConfigurationSection,
+        name: String,
+        worldName: String
+    ): ResidenceSnapshot {
+        val permissions = section.getConfigurationSection("Permissions")
+        val areas = section.getConfigurationSection("Areas")
+        val area = areas?.getString("main") ?: areas?.getKeys(false)?.firstNotNullOfOrNull { areas.getString(it) }
+        return ResidenceSnapshot(
+            name = name,
+            ownerUuid = permissions?.getString("OwnerUUID")?.let { value ->
+                runCatching { UUID.fromString(value) }.getOrNull()
+            },
+            ownerName = permissions?.getString("OwnerLastKnownName"),
+            worldName = worldName.takeIf { it.isNotBlank() },
+            teleportLocation = section.getString("TPLoc")?.let { parseTeleportLocation(worldName, it) }
+                ?: area?.let { parseAreaCenter(worldName, it) }
+        )
     }
 
     private fun parseTeleportLocation(worldName: String, value: String): BridgeLocation? {
@@ -235,7 +272,27 @@ object ResidenceHook {
 
     private fun residenceManager(): Any? {
         val residence = residenceInstance() ?: return null
-        return residence.value("getResidenceManager", "rmanager", "residenceManager")
+        val methods = listOf(
+            "getResidenceManager" to "com.bekvon.bukkit.residence.protection.ResidenceManager",
+            "getResidenceManagerAPI" to "com.bekvon.bukkit.residence.api.ResidenceInterface"
+        )
+        methods.forEach { (name, returnTypeName) ->
+            try {
+                val returnType = residence.javaClass.classLoader.loadClass(returnTypeName)
+                val type = MethodType.methodType(returnType)
+                val lookup = MethodHandles.publicLookup()
+                val manager = runCatching {
+                    lookup.findVirtual(residence.javaClass, name, type).invoke(residence)
+                }.getOrElse {
+                    lookup.findStatic(residence.javaClass, name, type).invoke()
+                }
+                return manager.also { residenceManagerFailure = null }
+            } catch (t: Throwable) {
+                val cause = t.cause ?: t
+                residenceManagerFailure = "${cause.javaClass.name}: ${cause.message}"
+            }
+        }
+        return null
     }
 
     private fun residenceInstance(): Any? {

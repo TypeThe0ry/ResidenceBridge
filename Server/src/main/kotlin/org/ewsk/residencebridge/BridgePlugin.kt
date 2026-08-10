@@ -350,6 +350,7 @@ object BridgePlugin {
                 CreateReservationStatus.RESERVED -> runPlayer(player) {
                     bypassCreate.add(player.uniqueId)
                     player.performCommand("res create $residenceName")
+                    confirmCreated(residenceName, rollbackIfMissing = true)
                     scheduleCreateChecks(player, residenceName)
                 }
             }

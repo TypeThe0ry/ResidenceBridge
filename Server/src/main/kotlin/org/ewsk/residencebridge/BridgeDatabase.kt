@@ -199,7 +199,8 @@ class BridgeDatabase(private val config: BridgeConfig) {
         val total = conn.prepareStatement(
             """
             SELECT COUNT(*) FROM residence_bridge_index
-            WHERE status='ACTIVE' AND (owner_uuid=? OR (owner_uuid IS NULL AND owner_name=?))
+            WHERE status='ACTIVE' AND name_key NOT LIKE '%.%'
+              AND (owner_uuid=? OR (owner_uuid IS NULL AND owner_name=?))
             """.trimIndent()
         ).use { ps ->
             ps.setString(1, ownerUuid.toString())
@@ -212,7 +213,8 @@ class BridgeDatabase(private val config: BridgeConfig) {
         val entries = conn.prepareStatement(
             """
             SELECT * FROM residence_bridge_index
-            WHERE status='ACTIVE' AND (owner_uuid=? OR (owner_uuid IS NULL AND owner_name=?))
+            WHERE status='ACTIVE' AND name_key NOT LIKE '%.%'
+              AND (owner_uuid=? OR (owner_uuid IS NULL AND owner_name=?))
             ORDER BY server_id ASC, display_name ASC
             LIMIT ? OFFSET ?
             """.trimIndent()
@@ -237,7 +239,8 @@ class BridgeDatabase(private val config: BridgeConfig) {
         val total = conn.prepareStatement(
             """
             SELECT COUNT(*) FROM residence_bridge_index
-            WHERE status='ACTIVE' AND LOWER(owner_name)=LOWER(?)
+            WHERE status='ACTIVE' AND name_key NOT LIKE '%.%'
+              AND LOWER(owner_name)=LOWER(?)
             """.trimIndent()
         ).use { ps ->
             ps.setString(1, ownerName)
@@ -249,7 +252,8 @@ class BridgeDatabase(private val config: BridgeConfig) {
         val entries = conn.prepareStatement(
             """
             SELECT * FROM residence_bridge_index
-            WHERE status='ACTIVE' AND LOWER(owner_name)=LOWER(?)
+            WHERE status='ACTIVE' AND name_key NOT LIKE '%.%'
+              AND LOWER(owner_name)=LOWER(?)
             ORDER BY server_id ASC, display_name ASC
             LIMIT ? OFFSET ?
             """.trimIndent()
@@ -546,7 +550,8 @@ class BridgeDatabase(private val config: BridgeConfig) {
         return conn.prepareStatement(
             """
             SELECT COUNT(*) FROM residence_bridge_index
-            WHERE $statusSql AND (owner_uuid=? OR (owner_uuid IS NULL AND owner_name=?))
+            WHERE $statusSql AND name_key NOT LIKE '%.%'
+              AND (owner_uuid=? OR (owner_uuid IS NULL AND owner_name=?))
             """.trimIndent()
         ).use { ps ->
             ps.setString(1, ownerUuid.toString())

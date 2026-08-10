@@ -51,3 +51,15 @@ internal fun findResidenceIndexRoute(
 ): ResidenceIndexEntry? {
     return findResidenceRoute(name, lookup)?.forTargetResidence(name)
 }
+
+internal fun <T> flattenResidenceTree(
+    roots: Iterable<Pair<String, T>>,
+    children: (T) -> Iterable<Pair<String, T>>
+): List<Pair<String, T>> {
+    fun flatten(name: String, node: T): List<Pair<String, T>> {
+        return listOf(name to node) + children(node).flatMap { (childName, child) ->
+            flatten("$name.$childName", child)
+        }
+    }
+    return roots.flatMap { (name, node) -> flatten(name, node) }
+}

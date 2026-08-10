@@ -80,6 +80,19 @@ class ResidenceRoutingTest {
         assertEquals("survival-2", target.serverId)
     }
 
+    @Test
+    fun `flattens nested residence trees with complete names`() {
+        data class Node(val children: List<Pair<String, Node>> = emptyList())
+        val grandchild = Node()
+        val child = Node(listOf("Grandchild" to grandchild))
+        val parent = Node(listOf("Child" to child))
+
+        val flattened = flattenResidenceTree(listOf("Parent" to parent)) { it.children }
+
+        assertEquals(listOf("Parent", "Parent.Child", "Parent.Child.Grandchild"), flattened.map { it.first })
+        assertSame(grandchild, flattened.last().second)
+    }
+
     private fun indexEntry(name: String, serverId: String) = ResidenceIndexEntry(
         nameKey = key(name),
         displayName = name,
