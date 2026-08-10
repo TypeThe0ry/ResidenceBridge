@@ -598,7 +598,7 @@ class BridgeDatabase(private val config: BridgeConfig) {
             displayName = getString("display_name"),
             serverId = getString("server_id"),
             worldName = getString("world"),
-            ownerUuid = getString("owner_uuid")?.let { UUID.fromString(it) },
+            ownerUuid = getString("owner_uuid")?.let { runCatching { UUID.fromString(it) }.getOrNull() },
             ownerName = getString("owner_name"),
             updatedAt = getLong("updated_at"),
             teleportLocation = readBridgeLocation()

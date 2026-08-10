@@ -130,10 +130,14 @@ object BridgePlugin {
         if (::messenger.isInitialized) {
             messenger.unregister()
         }
+        bypassCreate.clear()
+        bypassRename.clear()
+        bypassCommand.clear()
+        pendingArrivalTeleports.clear()
+        BridgeScheduler.shutdown()
         if (::database.isInitialized) {
             database.close()
         }
-        BridgeScheduler.shutdown()
     }
 
     fun onCommand(event: PlayerCommandPreprocessEvent) {
@@ -144,12 +148,11 @@ object BridgePlugin {
         if (handledCommandEvents.containsKey(event)) {
             return
         }
-        if (bypassCommand.remove(event.player.uniqueId)) {
-            handledCommandEvents[event] = true
-            return
-        }
         val parsed = parseResidenceCommand(event.message) ?: return
         handledCommandEvents[event] = true
+        if (bypassCommand.remove(event.player.uniqueId)) {
+            return
+        }
         if (parsed.subCommand == "confirm") {
             handleConfirm(event)
             return
@@ -171,9 +174,6 @@ object BridgePlugin {
     }
 
     private fun handleCommandFromCommandMap(player: Player, label: String, args: Array<out String>): Boolean {
-        if (bypassCommand.remove(player.uniqueId)) {
-            return false
-        }
         val commandLine = (listOf(label) + args).joinToString(" ")
         val event = PlayerCommandPreprocessEvent(player, "/$commandLine")
         handleCommandOverride(event)
@@ -273,8 +273,13 @@ object BridgePlugin {
 
     @SubscribeEvent
     fun onQuit(event: PlayerQuitEvent) {
-        waitingTeleports.remove(event.player.uniqueId)?.cancelTasks()
-        pendingArrivalTeleports.remove(event.player.uniqueId)
+        val uuid = event.player.uniqueId
+        waitingTeleports.remove(uuid)?.cancelTasks()
+        pendingArrivalTeleports.remove(uuid)
+        pendingRemovals.remove(uuid)
+        bypassCreate.remove(uuid)
+        bypassRename.remove(uuid)
+        bypassCommand.remove(uuid)
         unregisterTeleportWaitListenerIfEmpty()
     }
 
@@ -441,6 +446,7 @@ object BridgePlugin {
         val location = player.location
         val current = waitingTeleports[player.uniqueId]
         if (current?.entry?.nameKey == entry.nameKey) {
+            player.sendMessage(MessageUtil.apply(config.messages.teleportWait, mapOf("seconds" to seconds, "name" to entry.displayName)))
             return
         }
         val waiting = WaitingTeleport(entry, location.world?.name, location.blockX, location.blockY, location.blockZ)
@@ -457,9 +463,8 @@ object BridgePlugin {
             }
         }
         waiting.tasks += runPlayer(player, seconds * 20L) {
-            val active = waitingTeleports.remove(player.uniqueId) ?: return@runPlayer
-            if (active === waiting) {
-                active.cancelTasks()
+            if (waitingTeleports.remove(player.uniqueId, waiting)) {
+                waiting.cancelTasks()
                 executeTeleport(player, entry)
             }
             unregisterTeleportWaitListenerIfEmpty()
@@ -706,7 +711,7 @@ object BridgePlugin {
                 try {
                     database.syncServerSnapshots(snapshots)
                     refreshCompletionCache()
-                    if (config.syncLogSuccess || snapshots.isEmpty()) {
+                    if (config.syncLogSuccess) {
                         info("Synced ${snapshots.size} residences for ${config.serverId}.")
                     }
                 } catch (t: Throwable) {
@@ -1016,7 +1021,7 @@ object BridgePlugin {
 
     private fun formatMax(max: Int): String = if (max == Int.MAX_VALUE) "无限" else max.toString()
 
-    private data class WaitingTeleport(
+    private class WaitingTeleport(
         val entry: ResidenceIndexEntry,
         val worldName: String?,
         val x: Int,
