@@ -36,6 +36,7 @@ dependencies {
     compileOnly("com.velocitypowered:velocity-api:3.4.0-SNAPSHOT")
     compileOnly(kotlin("stdlib"))
     compileOnly(fileTree("libs"))
+    testImplementation(kotlin("test-junit"))
 }
 
 tasks.withType<JavaCompile> {
