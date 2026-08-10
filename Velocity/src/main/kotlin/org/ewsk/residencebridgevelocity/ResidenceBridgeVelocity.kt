@@ -12,6 +12,7 @@ import taboolib.common.platform.function.warning
 import taboolib.platform.VelocityPlugin
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 
 object ResidenceBridgeVelocity : Plugin() {
     private val channel = MinecraftChannelIdentifier.from("residencebridge:main")
@@ -70,7 +71,7 @@ object ResidenceBridgeVelocity : Plugin() {
             request.requestId?.let { respondIfCurrent(source, player, it, "connect-failed") }
             return
         }
-        player.createConnectionRequest(server).connect().whenComplete { result, error ->
+        player.createConnectionRequest(server).connect().orTimeout(15, TimeUnit.SECONDS).whenComplete { result, error ->
             connecting.remove(player.uniqueId, attempt)
             val connected = error == null && result?.isSuccessful == true
             request.requestId?.let { respondIfCurrent(source, player, it, if (connected) "connected" else "connect-failed") }
