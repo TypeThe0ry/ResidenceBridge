@@ -43,7 +43,12 @@ object ResidenceBridgeCommand : CommandExecutor {
                     sender.sendMessage("你没有权限执行这个操作。")
                     return true
                 }
-                ResidenceHook.diagnostics().forEach { sender.sendMessage(it) }
+                // 内存部分在当前（主）线程采集，文件解析放异步线程，避免诊断命令卡服。
+                val memoryPart = ResidenceHook.diagnosticsMemoryPart()
+                BridgeScheduler.runAsync {
+                    val lines = ResidenceHook.diagnosticsLines(memoryPart)
+                    BridgeScheduler.runGlobal { lines.forEach { sender.sendMessage(it) } }
+                }
                 return true
             }
         }
