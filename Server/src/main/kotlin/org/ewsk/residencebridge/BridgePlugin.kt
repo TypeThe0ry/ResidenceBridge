@@ -44,6 +44,7 @@ object BridgePlugin {
     private val waitingTeleports = ConcurrentHashMap<UUID, WaitingTeleport>()
     private val pendingArrivalTeleports = ConcurrentHashMap<UUID, String>()
     private val inFlightTransfers = ConcurrentHashMap<UUID, UUID>()
+    private val joinSessions = ConcurrentHashMap<UUID, UUID>()
     private val residenceEventListener = object : Listener {}
     private val commandOverrideListener = object : Listener {}
     private val teleportWaitListener = object : Listener {}
@@ -78,7 +79,7 @@ object BridgePlugin {
     }
 
     fun syncNow(callback: (Int, Throwable?) -> Unit) {
-        if (!::database.isInitialized) {
+        if (!started || !::database.isInitialized) {
             callback(0, IllegalStateException("ResidenceBridge database is not initialized."))
             return
         }
@@ -144,6 +145,7 @@ object BridgePlugin {
         bypassCommand.clear()
         pendingArrivalTeleports.clear()
         inFlightTransfers.clear()
+        joinSessions.clear()
         BridgeScheduler.shutdown()
         if (::database.isInitialized) {
             database.close()
@@ -156,6 +158,7 @@ object BridgePlugin {
     }
 
     private fun handleCommandOverride(event: PlayerCommandPreprocessEvent) {
+        if (!started) return
         if (handledCommandEvents.containsKey(event)) {
             return
         }
@@ -185,6 +188,7 @@ object BridgePlugin {
     }
 
     private fun handleCommandFromCommandMap(player: Player, label: String, args: Array<out String>): Boolean {
+        if (!started) return false
         val commandLine = (listOf(label) + args).joinToString(" ")
         val event = PlayerCommandPreprocessEvent(player, "/$commandLine")
         handleCommandOverride(event)
@@ -249,6 +253,8 @@ object BridgePlugin {
         if (!started) return
         val player = event.player
         val uuid = player.uniqueId
+        val session = UUID.randomUUID()
+        joinSessions[uuid] = session
         runAsync {
             val pendingTeleport = database.consumePending(uuid)
             if (pendingTeleport != null) {
@@ -261,7 +267,9 @@ object BridgePlugin {
                 return@runAsync
             }
             runPlayer(player, config.joinDelayTicks) {
-                pendingActions.forEach { executePendingAction(player, it) }
+                if (player.isOnline && Bukkit.getPlayer(uuid) === player && joinSessions[uuid] == session) {
+                    pendingActions.forEach { executePendingAction(player, it) }
+                }
             }
         }
     }
@@ -290,6 +298,7 @@ object BridgePlugin {
         waitingTeleports.remove(uuid)?.cancelTasks()
         pendingArrivalTeleports.remove(uuid)
         inFlightTransfers.remove(uuid)
+        joinSessions.remove(uuid)
         messenger.cancelPending(uuid)
         pendingRemovals.remove(uuid)
         bypassCreate.remove(uuid)
@@ -624,10 +633,13 @@ object BridgePlugin {
     }
 
     private fun executePendingAction(player: Player, action: PendingAction) {
+        val parsed = parseResidenceCommand(action.commandText) ?: return
+        val target = parsed.args.getOrNull(0) ?: return
+        if (parsed.admin || parsed.subCommand != action.actionType || parsed.subCommand !in config.remoteActionCommands) return
+        if (key(target) != key(action.residenceName) || !action.targetServer.equals(config.serverId, ignoreCase = true)) return
         player.sendMessage(config.messages.remoteActionQueued)
         bypassCommand.add(player.uniqueId)
-        player.performCommand(action.commandText.removePrefix("/"))
-        val parsed = parseResidenceCommand(action.commandText) ?: return
+        player.performCommand(parsed.rawCommand)
         runPlayer(player, 40L) { confirmActionSnapshot(parsed) }
     }
 

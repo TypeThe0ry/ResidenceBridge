@@ -15,7 +15,7 @@ import java.util.concurrent.ConcurrentHashMap
 
 object ResidenceBridgeVelocity : Plugin() {
     private val channel = MinecraftChannelIdentifier.from("residencebridge:main")
-    private val connecting = ConcurrentHashMap.newKeySet<UUID>()
+    private val connecting = ConcurrentHashMap<UUID, UUID>()
 
     override fun onEnable() {
         VelocityPlugin.getInstance().server.channelRegistrar.register(channel)
@@ -65,12 +65,13 @@ object ResidenceBridgeVelocity : Plugin() {
             request.requestId?.let { respondIfCurrent(source, player, it, "connected") }
             return
         }
-        if (!connecting.add(player.uniqueId)) {
+        val attempt = UUID.randomUUID()
+        if (connecting.putIfAbsent(player.uniqueId, attempt) != null) {
             request.requestId?.let { respondIfCurrent(source, player, it, "connect-failed") }
             return
         }
         player.createConnectionRequest(server).connect().whenComplete { result, error ->
-            connecting.remove(player.uniqueId)
+            connecting.remove(player.uniqueId, attempt)
             val connected = error == null && result?.isSuccessful == true
             request.requestId?.let { respondIfCurrent(source, player, it, if (connected) "connected" else "connect-failed") }
             if (!connected) warning("Failed to connect ${player.username} to ${request.targetServer}: ${error?.message ?: result?.status}")
