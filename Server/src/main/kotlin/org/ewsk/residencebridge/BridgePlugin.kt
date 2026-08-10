@@ -80,14 +80,16 @@ object BridgePlugin {
             return
         }
         BridgeScheduler.runGlobal {
-            val snapshots = localSnapshots()
+            val memorySnapshots = ResidenceHook.memorySnapshots()
             runAsync {
                 try {
+                    ResidenceHook.refreshFileSnapshots()
+                    val snapshots = localSnapshots(ResidenceHook.mergeFileSnapshots(memorySnapshots))
                     database.syncServerSnapshots(snapshots)
                     refreshCompletionCache()
-                    callback(snapshots.size, null)
+                    BridgeScheduler.runGlobal { callback(snapshots.size, null) }
                 } catch (t: Throwable) {
-                    callback(0, t)
+                    BridgeScheduler.runGlobal { callback(0, t) }
                 }
             }
         }
@@ -104,6 +106,7 @@ object BridgePlugin {
         registerCommandOverride()
         registerResidenceEvents()
         PlaceholderBridge.register(config, database)
+        runAsync { ResidenceHook.refreshFileSnapshots() }
         scheduleSync()
         refreshCompletionCache()
     }
@@ -706,9 +709,11 @@ object BridgePlugin {
 
     private fun scheduleSync() {
         syncTask = BridgeScheduler.runGlobalTimer(config.syncInitialDelayTicks, config.syncIntervalSeconds * 20L) {
-            val snapshots = localSnapshots()
+            val memorySnapshots = ResidenceHook.memorySnapshots()
             runAsync {
                 try {
+                    ResidenceHook.refreshFileSnapshots()
+                    val snapshots = localSnapshots(ResidenceHook.mergeFileSnapshots(memorySnapshots))
                     database.syncServerSnapshots(snapshots)
                     refreshCompletionCache()
                     if (config.syncLogSuccess) {
@@ -725,8 +730,8 @@ object BridgePlugin {
         BridgeScheduler.runAsync(block)
     }
 
-    private fun localSnapshots(): List<ResidenceSnapshot> {
-        return ResidenceHook.allSnapshots().filter { snapshot -> snapshot.nameKey !in localDeleteTombstones }
+    private fun localSnapshots(snapshots: List<ResidenceSnapshot> = ResidenceHook.allSnapshots()): List<ResidenceSnapshot> {
+        return snapshots.filter { snapshot -> snapshot.nameKey !in localDeleteTombstones }
     }
 
     private fun markLocalDeleted(name: String) {

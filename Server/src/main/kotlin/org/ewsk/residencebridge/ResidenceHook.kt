@@ -16,8 +16,13 @@ import java.util.UUID
 object ResidenceHook {
 
     private var residenceManagerFailure: String? = null
+    @Volatile
+    private var fileSnapshotsCache: List<ResidenceSnapshot> = emptyList()
+    @Volatile
+    private var fileSnapshotsByNameKey: Map<String, ResidenceSnapshot> = emptyMap()
+    private val fileRefreshLock = Any()
 
-    fun exists(name: String): Boolean = getResidence(name) != null || fileSnapshot(name) != null
+    fun exists(name: String): Boolean = getResidence(name) != null || fileSnapshotsByNameKey.containsKey(key(name))
 
     fun isLoaded(name: String): Boolean = getResidence(name) != null
 
@@ -60,7 +65,7 @@ object ResidenceHook {
     }
 
     fun allSnapshots(): List<ResidenceSnapshot> {
-        val fileSnapshots = runCatching { fileSnapshots() }.getOrDefault(emptyList())
+        val fileSnapshots = fileSnapshotsCache
         return try {
             val fileSnapshotsByKey = fileSnapshots.associateBy { it.nameKey }
             val roots = residenceValues().ifEmpty {
@@ -74,11 +79,40 @@ object ResidenceHook {
     }
 
     fun toSnapshot(name: String): ResidenceSnapshot? {
-        val residence = getResidence(name) ?: return fileSnapshot(name)
+        val residence = getResidence(name) ?: return fileSnapshotsByNameKey[key(name)]
         val residenceName = residence.residenceName() ?: name
-        val snapshot = snapshotFromResidence(residence, residenceName) ?: return fileSnapshot(name)
-        val fileSnapshot = fileSnapshot(residenceName)
+        val snapshot = snapshotFromResidence(residence, residenceName) ?: return fileSnapshotsByNameKey[key(name)]
+        val fileSnapshot = fileSnapshotsByNameKey[key(residenceName)]
         return snapshot.copy(teleportLocation = fileSnapshot?.teleportLocation ?: snapshot.teleportLocation)
+    }
+
+    fun memorySnapshots(): List<ResidenceSnapshot> {
+        return try {
+            val roots = residenceValues().ifEmpty {
+                residenceNames().mapNotNull { getResidence(it) }
+            }
+            roots.flatMap { residenceSnapshots(it, emptyMap()) }
+        } catch (_: Throwable) {
+            emptyList()
+        }
+    }
+
+    fun refreshFileSnapshots() {
+        synchronized(fileRefreshLock) {
+            val snapshots = runCatching { loadFileSnapshots() }.getOrDefault(emptyList())
+            fileSnapshotsCache = snapshots
+            fileSnapshotsByNameKey = snapshots.associateBy { it.nameKey }
+        }
+    }
+
+    fun mergeFileSnapshots(memorySnapshots: List<ResidenceSnapshot>): List<ResidenceSnapshot> {
+        val files = fileSnapshotsCache
+        if (memorySnapshots.isEmpty()) return files
+        val byNameKey = fileSnapshotsByNameKey
+        return memorySnapshots.map { snapshot ->
+            val location = byNameKey[snapshot.nameKey]?.teleportLocation
+            if (location == null) snapshot else snapshot.copy(teleportLocation = location)
+        }
     }
 
     fun snapshotFromResidence(residence: Any?, nameHint: String? = null): ResidenceSnapshot? {
@@ -113,7 +147,7 @@ object ResidenceHook {
         val manager = residenceManager()
         val values = residenceValues()
         val names = residenceNames()
-        val fileSnapshots = fileSnapshots()
+        val fileSnapshots = fileSnapshotsCache
         return listOf(
             "Residence plugin: ${Bukkit.getPluginManager().getPlugin("Residence")?.description?.fullName ?: "not found"}",
             "Residence instance: ${residenceInstance()?.javaClass?.name ?: "null"}",
@@ -126,7 +160,7 @@ object ResidenceHook {
         )
     }
 
-    private fun fileSnapshots(): List<ResidenceSnapshot> {
+    private fun loadFileSnapshots(): List<ResidenceSnapshot> {
         val residencePlugin = Bukkit.getPluginManager().getPlugin("Residence") ?: return emptyList()
         val worldsFolder = File(residencePlugin.dataFolder, "Save/Worlds")
         if (!worldsFolder.isDirectory) {
@@ -208,11 +242,6 @@ object ResidenceHook {
             y = maxY + 1.0,
             z = (minZ + maxZ) / 2.0 + 0.5
         )
-    }
-
-    private fun fileSnapshot(name: String): ResidenceSnapshot? {
-        val nameKey = key(name)
-        return fileSnapshots().firstOrNull { it.nameKey == nameKey }
     }
 
     private fun getResidence(name: String): Any? {
