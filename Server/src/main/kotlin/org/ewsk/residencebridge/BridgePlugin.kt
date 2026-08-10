@@ -34,6 +34,8 @@ object BridgePlugin {
     private lateinit var database: BridgeDatabase
     private lateinit var messenger: VelocityMessenger
     private var syncTask: BridgeTask? = null
+    @Volatile
+    private var started = false
     private val bypassCreate = Collections.synchronizedSet(mutableSetOf<UUID>())
     private val bypassRename = Collections.synchronizedSet(mutableSetOf<UUID>())
     private val bypassCommand = Collections.synchronizedSet(mutableSetOf<UUID>())
@@ -97,6 +99,7 @@ object BridgePlugin {
     }
 
     private fun start() {
+        started = false
         BridgeScheduler.init(plugin)
         config = BridgeConfig.load(plugin.config)
         database = BridgeDatabase(config)
@@ -110,9 +113,11 @@ object BridgePlugin {
         ResidenceHook.refreshFileSnapshots()
         scheduleSync()
         refreshCompletionCache()
+        started = true
     }
 
     private fun stop() {
+        started = false
         syncTask?.cancel()
         syncTask = null
         waitingTeleports.values.forEach { it.cancelTasks() }
@@ -146,6 +151,7 @@ object BridgePlugin {
     }
 
     fun onCommand(event: PlayerCommandPreprocessEvent) {
+        if (!started) return
         handleCommandOverride(event)
     }
 
@@ -240,6 +246,7 @@ object BridgePlugin {
 
     @SubscribeEvent
     fun onJoin(event: PlayerJoinEvent) {
+        if (!started) return
         val player = event.player
         val uuid = player.uniqueId
         runAsync {
@@ -278,6 +285,7 @@ object BridgePlugin {
 
     @SubscribeEvent
     fun onQuit(event: PlayerQuitEvent) {
+        if (!started) return
         val uuid = event.player.uniqueId
         waitingTeleports.remove(uuid)?.cancelTasks()
         pendingArrivalTeleports.remove(uuid)
