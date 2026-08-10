@@ -15,28 +15,91 @@ import java.util.concurrent.ConcurrentHashMap
 object ResidenceHook {
 
     // ===== 反射缓存 =====
-    private val classCache = ConcurrentHashMap<String, Class<*>?>()
-    private val methodCache = ConcurrentHashMap<String, Method?>()
-    private val fieldCache = ConcurrentHashMap<String, Field?>()
-    private val flagCache = ConcurrentHashMap<String, Any?>()
-    private val flagComboCache = ConcurrentHashMap<String, Any?>()
+    // ConcurrentHashMap 不接受 null value，而反射查找「没找到」是完全正常的结果
+    // （不同 Residence 版本字段/方法名不同，Flag 也可能不存在）。
+    // 直接 getOrPut 存 null 会在 putIfAbsent 里抛 NPE，把整条调用链打断，
+    // 所以统一用哨兵对象表示「查过且不存在」，既避免 NPE 也不会每次重复反射。
+    private val ABSENT = Any()
+    private val classCache = ConcurrentHashMap<String, Any>()
+    private val methodCache = ConcurrentHashMap<String, Any>()
+    private val fieldCache = ConcurrentHashMap<String, Any>()
+    private val flagCache = ConcurrentHashMap<String, Any>()
+    private val flagComboCache = ConcurrentHashMap<String, Any>()
+
+    /**
+     * 缓存可能为 null 的反射查找结果：命中哨兵表示之前查过且不存在。
+     */
+    private inline fun <reified T : Any> ConcurrentHashMap<String, Any>.cachedOrNull(
+        key: String,
+        resolve: () -> T?
+    ): T? {
+        when (val cached = this[key]) {
+            ABSENT -> return null
+            is T -> return cached
+        }
+        val resolved = resolve()
+        this[key] = resolved ?: ABSENT
+        return resolved
+    }
 
     // ===== sparrow-reflection Proxy =====
-    private val residencePluginProxy by lazy { createProxy(ResidencePluginProxy::class.java) }
-    private val managerProxy by lazy { createProxy(ResidenceManagerProxy::class.java) }
-    private val claimedResidenceProxy by lazy { createProxy(ClaimedResidenceProxy::class.java) }
-    private val flagsProxy by lazy { createProxy(FlagsProxy::class.java) }
-    private val permissionsProxy by lazy { createProxy(FlagPermissionsProxy::class.java) }
-    private val flagComboProxy by lazy { createProxy(FlagComboProxy::class.java) }
+    // ResidenceBridge 对 Residence 是硬依赖，进入本对象时目标插件已经启用；直接初始化代理，
+    // 把一次性的类加载/ASM 生成留在插件启动阶段，并移除热路径上的 SynchronizedLazyImpl 读取。
+    private val residencePluginProxy = createProxy(ResidencePluginProxy::class.java)
+    private val managerProxy = createProxy(ResidenceManagerProxy::class.java)
+    private val claimedResidenceProxy = createProxy(ClaimedResidenceProxy::class.java)
+    private val flagsProxy = createProxy(FlagsProxy::class.java)
+    private val permissionsProxy = createProxy(FlagPermissionsProxy::class.java)
+    private val flagComboProxy = createProxy(FlagComboProxy::class.java)
 
-    private val residenceInstance: Any? by lazy { resolveResidenceInstance() }
-    private val residenceManager: Any? by lazy {
-        proxySafe { residencePluginProxy?.getResidenceManager(residenceInstance) }
-            ?: residenceInstance?.value("getResidenceManager", "rmanager", "residenceManager")
+    // Residence 实例与 manager 不能用 by lazy 缓存：lazy 会把「解析失败」也永久记住。
+    // 插件加载顺序、Residence 延迟初始化或 /reload 都可能让首次解析拿到 null，
+    // 之后即使 Residence 已就绪也再也取不到 manager，同步会静默退化成只读文件快照。
+    // 这里只缓存成功结果，失败时下次调用重试；命中后是一次 volatile 读，不比 lazy 贵。
+    @Volatile
+    private var residenceInstanceCache: Any? = null
+    @Volatile
+    private var residenceManagerCache: Any? = null
+
+    private val residenceInstance: Any?
+        get() = residenceInstanceCache ?: resolveResidenceInstance()?.also { residenceInstanceCache = it }
+
+    private val residenceManager: Any?
+        get() = residenceManagerCache ?: resolveResidenceManager()?.also { residenceManagerCache = it }
+
+    private fun resolveResidenceManager(): Any? {
+        val instance = residenceInstance ?: return null
+        return proxySafe { residencePluginProxy?.getResidenceManager(instance) }
+            ?: instance.value("getResidenceManager", "rmanager", "residenceManager")
     }
-    private val flagsTp by lazy { proxySafe { flagsProxy?.tp() } ?: residenceFlag("tp") }
-    private val flagsMove by lazy { proxySafe { flagsProxy?.move() } ?: residenceFlag("move") }
-    private val flagComboTrueOrNone by lazy { proxySafe { flagComboProxy?.trueOrNone() } ?: residenceFlagCombo("TrueOrNone") }
+    // 同理：Flag 对象在 Residence 就绪前解析会得到 null，用 lazy 会永久锁死，
+    // 让 tp/move 权限判断之后一直失效。这些已由 flagCache/flagComboCache 内部缓存，
+    // 这里直接透传即可。
+    private val flagsTp: Any?
+        get() = proxySafe { flagsProxy?.tp() } ?: residenceFlag("tp")
+    private val flagsMove: Any?
+        get() = proxySafe { flagsProxy?.move() } ?: residenceFlag("move")
+    private val flagComboTrueOrNone: Any?
+        get() = proxySafe { flagComboProxy?.trueOrNone() } ?: residenceFlagCombo("TrueOrNone")
+
+    /**
+     * 在插件启用阶段完成一次性代理生成、类加载和 manager/flag 解析，避免首个定时同步
+     * 或首条玩家命令承担 ClassLoader/ZipFile I/O。Residence 是硬依赖，此时应已完成启用。
+     */
+    fun warmUp() {
+        residenceManager
+        flagsTp
+        flagsMove
+        flagComboTrueOrNone
+    }
+
+    /**
+     * /rb reload 时丢弃绑定到旧 Residence 运行时对象的成功缓存；反射元数据缓存仍可复用。
+     */
+    fun resetRuntimeCaches() {
+        residenceManagerCache = null
+        residenceInstanceCache = null
+    }
 
     // ===== 文件快照缓存（按文件粒度：file -> (mtime, snapshots)） =====
     // 解析 YAML 是重 I/O 操作，只允许在异步线程触发；主线程一律读已缓存结果。
@@ -172,8 +235,10 @@ object ResidenceHook {
             return emptyList()
         }
         val result = ArrayList<ResidenceSnapshot>(values.size)
-        values.forEach { residence ->
-            snapshotFromResidence(residence)?.let { result += it }
+        for (residence in values) {
+            if (residence != null) {
+                snapshotFromResidence(residence)?.let { result += it }
+            }
         }
         return result
     }
@@ -208,19 +273,29 @@ object ResidenceHook {
     /**
      * 异步线程侧：补齐文件快照信息并生成最终诊断文本。
      */
-    fun diagnosticsLines(memoryPart: DiagnosticsMemoryPart): List<String> {
+    fun diagnosticsData(memoryPart: DiagnosticsMemoryPart): DiagnosticsData {
         val fileSnaps = fileSnapshots()
         val allSnaps = mergeFileTeleportLocations(memoryPart.snapshots)
-        return listOf(
-            "Residence plugin: ${memoryPart.pluginName}",
-            "Residence instance: ${memoryPart.instanceClass}",
-            "Residence manager: ${memoryPart.managerClass}",
-            "Residence names: ${memoryPart.names.size} ${memoryPart.names.joinToString()}",
-            "Residence values: ${memoryPart.snapshots.size}",
-            "Residence file snapshots: ${fileSnaps.size} ${fileSnaps.joinToString { it.name }}",
-            "Snapshots: ${allSnaps.size} ${allSnaps.joinToString { it.name }}"
+        return DiagnosticsData(
+            pluginName = memoryPart.pluginName,
+            instanceClass = memoryPart.instanceClass,
+            managerClass = memoryPart.managerClass,
+            names = memoryPart.names,
+            memorySnapshotCount = memoryPart.snapshots.size,
+            fileSnapshotNames = fileSnaps.map { it.name },
+            mergedSnapshotNames = allSnaps.map { it.name }
         )
     }
+
+    data class DiagnosticsData(
+        val pluginName: String,
+        val instanceClass: String,
+        val managerClass: String,
+        val names: List<String>,
+        val memorySnapshotCount: Int,
+        val fileSnapshotNames: List<String>,
+        val mergedSnapshotNames: List<String>
+    )
 
     data class DiagnosticsMemoryPart(
         val pluginName: String,
@@ -373,20 +448,20 @@ object ResidenceHook {
     private fun claimedResidenceByName(name: String): Any? {
         proxySafe { claimedResidenceProxy?.getByName(name) }?.let { return it }
         val clazz = loadClass("com.bekvon.bukkit.residence.protection.ClaimedResidence") ?: return null
-        val method = methodCache.getOrPut("${clazz.name}#getByName(java.lang.String)") {
+        val method = methodCache.cachedOrNull<Method>("${clazz.name}#getByName(java.lang.String)") {
             runCatching { clazz.getMethod("getByName", String::class.java) }.getOrNull()
         } ?: return null
         return runCatching { method.invoke(null, name) }.getOrNull()
     }
 
-    private fun residenceValues(): Collection<Any> {
+    private fun residenceValues(): Collection<*> {
         val map = residencesMap()
         if (map != null) {
-            return map.values.filterNotNull()
+            // 直接遍历 manager 的 values 视图；调用方会跳过 null，无需每轮同步先复制一份列表。
+            return map.values
         }
-        val manager = residenceManager ?: return emptyList()
-        val collection = manager.value("getResidences", "residences") as? Collection<*>
-        return collection?.filterNotNull() ?: emptyList()
+        val manager = residenceManager ?: return emptyList<Any>()
+        return manager.value("getResidences", "residences") as? Collection<*> ?: emptyList<Any>()
     }
 
     private fun residenceNames(): List<String> {
@@ -421,7 +496,7 @@ object ResidenceHook {
     }
 
     private fun loadClass(className: String): Class<*>? {
-        return classCache.getOrPut(className) {
+        return classCache.cachedOrNull<Class<*>>(className) {
             runCatching { Class.forName(className) }.getOrNull()
                 ?: Bukkit.getPluginManager().getPlugin("Residence")?.javaClass?.classLoader?.let { loader ->
                     runCatching { loader.loadClass(className) }.getOrNull()
@@ -430,16 +505,18 @@ object ResidenceHook {
     }
 
     private fun residenceFlag(name: String): Any? {
-        return flagCache.getOrPut(name) {
-            val clazz = loadClass("com.bekvon.bukkit.residence.containers.Flags") ?: return@getOrPut null
+        return flagCache.cachedOrNull(name) {
+            val clazz = loadClass("com.bekvon.bukkit.residence.containers.Flags")
+                ?: return@cachedOrNull null
             runCatching { clazz.getField(name).get(null) }.getOrNull()
                 ?: runCatching { clazz.getMethod("getFlag", String::class.java).invoke(null, name) }.getOrNull()
         }
     }
 
     private fun residenceFlagCombo(name: String): Any? {
-        return flagComboCache.getOrPut(name) {
-            val clazz = loadClass("com.bekvon.bukkit.residence.protection.FlagPermissions\$FlagCombo") ?: return@getOrPut null
+        return flagComboCache.cachedOrNull(name) {
+            val clazz = loadClass("com.bekvon.bukkit.residence.protection.FlagPermissions\$FlagCombo")
+                ?: return@cachedOrNull null
             runCatching { clazz.getField(name).get(null) }.getOrNull()
                 ?: runCatching { clazz.getMethod("valueOf", String::class.java).invoke(null, name) }.getOrNull()
         }
@@ -530,7 +607,7 @@ object ResidenceHook {
 
     private fun Any.method(name: String, vararg parameterTypes: Class<*>): Method? {
         val key = methodKey(javaClass, name, parameterTypes)
-        return methodCache.getOrPut(key) { resolveMethod(javaClass, name, parameterTypes) }
+        return methodCache.cachedOrNull(key) { resolveMethod(javaClass, name, parameterTypes) }
     }
 
     private fun resolveMethod(clazz: Class<*>, name: String, parameterTypes: Array<out Class<*>>): Method? {
@@ -557,7 +634,7 @@ object ResidenceHook {
 
     private fun Any.field(name: String): Field? {
         val key = "${javaClass.name}#$name"
-        return fieldCache.getOrPut(key) { resolveField(javaClass, name) }
+        return fieldCache.cachedOrNull(key) { resolveField(javaClass, name) }
     }
 
     private fun resolveField(clazz: Class<*>, name: String): Field? {

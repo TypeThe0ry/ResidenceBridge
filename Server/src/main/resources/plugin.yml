@@ -9,8 +9,6 @@ commands:
   rb:
     description: ResidenceBridge admin command
     aliases: [residencebridge]
-    permission: residencebridge.command
-    permission-message: "&c你没有权限执行这个操作。"
 permissions:
   residencebridge.command:
     description: Access to ResidenceBridge command

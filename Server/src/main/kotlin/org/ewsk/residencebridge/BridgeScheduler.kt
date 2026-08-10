@@ -130,7 +130,7 @@ object BridgeScheduler {
 
     private fun warn(message: String, t: Throwable) {
         if (::plugin.isInitialized) {
-            plugin.logger.warning("$message: ${t.message}")
+            plugin.logger.log(java.util.logging.Level.WARNING, message, t)
         }
     }
 

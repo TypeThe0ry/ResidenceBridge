@@ -42,7 +42,13 @@ interface ResidencePluginProxy {
     fun getResidenceManager(residence: Any?): Any?
 }
 
-@ReflectionProxy(name = ["com.bekvon.bukkit.residence.ResidenceManager"], optional = true)
+@ReflectionProxy(
+    name = [
+        "com.bekvon.bukkit.residence.protection.ResidenceManager",
+        "com.bekvon.bukkit.residence.ResidenceManager"
+    ],
+    optional = true
+)
 interface ResidenceManagerProxy {
     @MethodInvoker(name = ["getByName"], optional = true)
     fun getByName(manager: Any?, name: String): Any?

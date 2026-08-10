@@ -2,6 +2,8 @@ package org.ewsk.residencebridgevelocity
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertIs
+import kotlin.test.assertNull
 
 /**
  * 插件消息载荷解析测试。
@@ -66,6 +68,42 @@ class PayloadParsingTest {
         // 内嵌空白说明载荷结构不对，不应拿去做服务器查找
         assertEquals("", parse("connect|survival lobby"))
         assertEquals("", parse("connect|survival\tlobby"))
+    }
+
+    @Test
+    fun `parses status request with request id`() {
+        val request = assertIs<ProxyRequest.Status>(parseProxyRequest("status|req123|creative".encodeToByteArray()))
+        assertEquals("req123", request.requestId)
+        assertEquals("creative", request.targetServer)
+    }
+
+    @Test
+    fun `parses acknowledged connect request`() {
+        val request = assertIs<ProxyRequest.Connect>(parseProxyRequest("connect|req456|survival".encodeToByteArray()))
+        assertEquals("req456", request.requestId)
+        assertEquals("survival", request.targetServer)
+    }
+
+    @Test
+    fun `rejects malformed request ids and extra fields`() {
+        assertNull(parseProxyRequest("status||creative".encodeToByteArray()))
+        assertNull(parseProxyRequest("status|bad id|creative".encodeToByteArray()))
+        assertNull(parseProxyRequest("connect|id|survival|extra".encodeToByteArray()))
+    }
+
+    @Test
+    fun `maps registered and reachable servers to available`() {
+        assertEquals("available", proxyStatus(serverRegistered = true, pingSucceeded = true))
+    }
+
+    @Test
+    fun `maps registered but unreachable servers to offline`() {
+        assertEquals("offline", proxyStatus(serverRegistered = true, pingSucceeded = false))
+    }
+
+    @Test
+    fun `maps unknown servers to not found`() {
+        assertEquals("not-found", proxyStatus(serverRegistered = false, pingSucceeded = true))
     }
 
     @Test

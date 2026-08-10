@@ -33,6 +33,7 @@ object BridgePlugin {
     private lateinit var config: BridgeConfig
     private lateinit var database: BridgeDatabase
     private lateinit var messenger: VelocityMessenger
+    private lateinit var messages: MessageService
     private var syncTask: BridgeTask? = null
     private val bypassCreate = Collections.synchronizedSet(mutableSetOf<UUID>())
     private val bypassRename = Collections.synchronizedSet(mutableSetOf<UUID>())
@@ -86,9 +87,15 @@ object BridgePlugin {
     }
 
     fun reload() {
+        val loadedConfig = BridgeConfig.load(File(plugin.dataFolder, "config.yml"))
+        messages.reload(loadedConfig.language)
         stop()
-        plugin.reloadConfig()
-        start()
+        config = loadedConfig
+        start(configAlreadyLoaded = true)
+    }
+
+    fun send(sender: CommandSender, key: String, placeholders: Map<String, Any?> = emptyMap()) {
+        messages.send(sender, key, placeholders)
     }
 
     fun syncNow(callback: (Int, Throwable?) -> Unit) {
@@ -109,9 +116,15 @@ object BridgePlugin {
         }
     }
 
-    private fun start() {
+    private fun start(configAlreadyLoaded: Boolean = false) {
         BridgeScheduler.init(plugin)
-        config = BridgeConfig.load(File(plugin.dataFolder, "config.yml"))
+        ResidenceHook.resetRuntimeCaches()
+        ResidenceHook.warmUp()
+        if (!configAlreadyLoaded) {
+            config = BridgeConfig.load(File(plugin.dataFolder, "config.yml"))
+            messages = MessageService.create(plugin as JavaPlugin)
+            messages.initialize(config)
+        }
         database = BridgeDatabase(config)
         database.initTables()
         messenger = VelocityMessenger(plugin, config)
@@ -334,7 +347,7 @@ object BridgePlugin {
         val page = firstArgPage ?: parsed.args.getOrNull(1)?.toIntOrNull() ?: 1
         event.isCancelled = true
         if (targetOwner != null && !player.canListOthers()) {
-            player.sendBridgeMessage(config.messages.noPermission)
+            player.sendBridgeMessage("command.no-permission")
             return
         }
         runAsync {
@@ -345,26 +358,24 @@ object BridgePlugin {
             }
             runPlayer(player) {
                 if (result.total <= 0) {
-                    player.sendMessage(config.list.empty)
+                    messages.send(player, "list.empty")
                     return@runPlayer
                 }
-                player.sendMessage(
-                    MessageUtil.apply(
-                        if (targetOwner == null) config.list.header else config.list.otherHeader,
-                        mapOf("count" to result.total, "page" to result.page, "max_page" to result.maxPage, "target" to (targetOwner ?: player.name))
-                    )
+                messages.send(
+                    player,
+                    if (targetOwner == null) "list.header" else "list.other-header",
+                    mapOf("count" to result.total, "page" to result.page, "max_page" to result.maxPage, "target" to (targetOwner ?: player.name))
                 )
                 result.entries.forEachIndexed { index, entry ->
-                    player.sendMessage(
-                        MessageUtil.apply(
-                            config.list.line,
-                            mapOf(
-                                "index" to ((result.page - 1) * result.pageSize + index + 1),
-                                "name" to entry.displayName,
-                                "server" to entry.serverId,
-                                "world" to entry.worldName,
-                                "owner" to entry.ownerName
-                            )
+                    messages.send(
+                        player,
+                        "list.line",
+                        mapOf(
+                            "index" to ((result.page - 1) * result.pageSize + index + 1),
+                            "name" to entry.displayName,
+                            "server" to entry.serverId,
+                            "world" to entry.worldName,
+                            "owner" to entry.ownerName
                         )
                     )
                 }
@@ -382,19 +393,17 @@ object BridgePlugin {
         val maxResidences = config.limits.maxFor(player)
         runAsync {
             if (database.hasCreateConflict(residenceName)) {
-                player.sendBridgeMessage(MessageUtil.apply(config.messages.duplicate, mapOf("name" to residenceName)))
+                player.sendBridgeMessage("residence.duplicate", mapOf("name" to residenceName))
                 return@runAsync
             }
             val reserved = database.tryReserveCreate(residenceName, player.uniqueId, player.name, maxResidences)
             when (reserved.status) {
                 CreateReservationStatus.DUPLICATE -> player.sendBridgeMessage(
-                    MessageUtil.apply(config.messages.duplicate, mapOf("name" to residenceName))
+                    "residence.duplicate", mapOf("name" to residenceName)
                 )
                 CreateReservationStatus.LIMIT_REACHED -> player.sendBridgeMessage(
-                    MessageUtil.apply(
-                        config.messages.limitReached,
-                        mapOf("count" to reserved.count, "max" to formatMax(reserved.max))
-                    )
+                    "residence.limit-reached",
+                    mapOf("count" to reserved.count, "max" to formatMax(player, reserved.max))
                 )
                 CreateReservationStatus.RESERVED -> runPlayer(player) {
                     bypassCreate.add(player.uniqueId)
@@ -476,7 +485,7 @@ object BridgePlugin {
         runAsync {
             val entry = database.findIndex(residenceName)
             if (entry == null) {
-                player.sendBridgeMessage(MessageUtil.apply(config.messages.notFound, mapOf("name" to residenceName)))
+                player.sendBridgeMessage("residence.not-found", mapOf("name" to residenceName))
                 return@runAsync
             }
             runPlayer(player) { startTeleport(player, entry) }
@@ -494,9 +503,7 @@ object BridgePlugin {
         // 这里必须重发一次提示，否则玩家重复输入命令时什么反馈都看不到。
         val current = waitingTeleports[player.uniqueId]
         if (current != null && current.entry.nameKey == entry.nameKey) {
-            player.sendMessage(
-                MessageUtil.apply(config.messages.teleportWait, mapOf("seconds" to seconds, "name" to entry.displayName))
-            )
+            messages.send(player, "teleport.wait", mapOf("seconds" to seconds, "name" to entry.displayName))
             return
         }
         val waiting = WaitingTeleport(entry, location.world?.name, location.blockX, location.blockY, location.blockZ)
@@ -508,7 +515,7 @@ object BridgePlugin {
             waiting.addTask(
                 runPlayer(player, delay) {
                     if (waitingTeleports[player.uniqueId] === waiting) {
-                        player.sendMessage(MessageUtil.apply(config.messages.teleportWait, mapOf("seconds" to remaining, "name" to entry.displayName)))
+                        messages.send(player, "teleport.wait", mapOf("seconds" to remaining, "name" to entry.displayName))
                         playCountdownSound(player)
                     }
                 }
@@ -531,7 +538,7 @@ object BridgePlugin {
 
     private fun cancelWaitingTeleport(player: Player) {
         waitingTeleports.remove(player.uniqueId)?.cancelTasks() ?: return
-        player.sendMessage(config.messages.teleportCancelled)
+        messages.send(player, "teleport.cancelled")
         unregisterTeleportWaitListenerIfEmpty()
     }
 
@@ -540,10 +547,9 @@ object BridgePlugin {
             runNativeResidenceTeleport(player, entry.displayName)
             return
         }
-        runAsync {
+        checkServerThenConnect(player, entry.serverId, "teleport.switching") {
             val expireAt = System.currentTimeMillis() + config.pendingExpireSeconds * 1000L
             database.writePending(player.uniqueId, player.name, entry.displayName, entry.serverId, expireAt)
-            runPlayer(player) { connectToServer(player, entry.serverId, config.messages.switching) }
         }
     }
 
@@ -562,7 +568,7 @@ object BridgePlugin {
                 if (!sameNameKey) {
                     val reserved = database.reserveName(newName, config.serverId, player.uniqueId, player.name)
                     if (!reserved) {
-                        player.sendBridgeMessage(MessageUtil.apply(config.messages.duplicate, mapOf("name" to newName)))
+                        player.sendBridgeMessage("residence.duplicate", mapOf("name" to newName))
                         return@runAsync
                     }
                 }
@@ -578,17 +584,17 @@ object BridgePlugin {
         runAsync {
             val entry = database.findIndex(oldName)
             if (entry == null) {
-                player.sendBridgeMessage(MessageUtil.apply(config.messages.notFound, mapOf("name" to oldName)))
+                player.sendBridgeMessage("residence.not-found", mapOf("name" to oldName))
                 return@runAsync
             }
             if (entry.serverId.equals(config.serverId, ignoreCase = true)) {
-                player.sendBridgeMessage(MessageUtil.apply(config.messages.notFound, mapOf("name" to oldName)))
+                player.sendBridgeMessage("residence.not-found", mapOf("name" to oldName))
                 return@runAsync
             }
             if (key(oldName) != key(newName)) {
                 val reserved = database.reserveName(newName, entry.serverId, entry.ownerUuid, entry.ownerName)
                 if (!reserved) {
-                    player.sendBridgeMessage(MessageUtil.apply(config.messages.duplicate, mapOf("name" to newName)))
+                    player.sendBridgeMessage("residence.duplicate", mapOf("name" to newName))
                     return@runAsync
                 }
             }
@@ -639,7 +645,7 @@ object BridgePlugin {
         runAsync {
             val entry = database.findIndex(targetResidence)
             if (entry == null) {
-                player.sendBridgeMessage(MessageUtil.apply(config.messages.notFound, mapOf("name" to targetResidence)))
+                player.sendBridgeMessage("residence.not-found", mapOf("name" to targetResidence))
                 return@runAsync
             }
             if (entry.serverId.equals(config.serverId, ignoreCase = true)) {
@@ -655,13 +661,14 @@ object BridgePlugin {
     }
 
     private fun queueRemoteAction(player: Player, parsed: ParsedResidenceCommand, entry: ResidenceIndexEntry) {
-        val expireAt = System.currentTimeMillis() + config.pendingExpireSeconds * 1000L
-        database.writePendingAction(player.uniqueId, player.name, parsed.subCommand, parsed.rawCommand, entry.displayName, entry.serverId, expireAt)
-        runPlayer(player) { connectToServer(player, entry.serverId, config.messages.remoteActionSwitching) }
+        checkServerThenConnect(player, entry.serverId, "remote.switching") {
+            val expireAt = System.currentTimeMillis() + config.pendingExpireSeconds * 1000L
+            database.writePendingAction(player.uniqueId, player.name, parsed.subCommand, parsed.rawCommand, entry.displayName, entry.serverId, expireAt)
+        }
     }
 
     private fun executePendingAction(player: Player, action: PendingAction) {
-        player.sendMessage(config.messages.remoteActionQueued)
+        messages.send(player, "remote.queued")
         bypassCommand.add(player.uniqueId)
         player.performCommand(action.commandText.removePrefix("/"))
         val parsed = parseResidenceCommand(action.commandText) ?: return
@@ -787,12 +794,36 @@ object BridgePlugin {
         )
     }
 
-    private fun connectToServer(player: Player, serverId: String, message: String) {
-        val ok = messenger.requestConnect(player, serverId)
-        if (ok) {
-            player.sendMessage(MessageUtil.apply(message, mapOf("server" to serverId)))
-        } else {
-            player.sendMessage(config.messages.connectRequestFailed)
+    private fun checkServerThenConnect(player: Player, serverId: String, messageKey: String, writePending: () -> Unit) {
+        runPlayer(player) {
+            messenger.checkAvailability(player, serverId) { availability ->
+                runPlayer(player) {
+                    if (!player.isOnline) return@runPlayer
+                    when (availability) {
+                        ServerAvailability.AVAILABLE -> runAsync {
+                            try {
+                                writePending()
+                                runPlayer(player) {
+                                    val sent = messenger.requestConnect(player, serverId) {
+                                        runPlayer(player) { messages.send(player, "teleport.connect-failed") }
+                                    }
+                                    if (sent) {
+                                        messages.send(player, messageKey, mapOf("server" to serverId))
+                                    } else {
+                                        messages.send(player, "teleport.connect-failed")
+                                    }
+                                }
+                            } catch (t: Throwable) {
+                                plugin.logger.warning("Failed to prepare cross-server request: ${t.message}")
+                                player.sendBridgeMessage("teleport.connect-failed")
+                            }
+                        }
+                        ServerAvailability.NOT_FOUND -> messages.send(player, "teleport.server-not-found", mapOf("server" to serverId))
+                        ServerAvailability.OFFLINE -> messages.send(player, "teleport.server-offline", mapOf("server" to serverId))
+                        ServerAvailability.UNAVAILABLE -> messages.send(player, "teleport.status-unavailable")
+                    }
+                }
+            }
         }
     }
 
@@ -1317,20 +1348,21 @@ object BridgePlugin {
             try {
                 block()
             } catch (t: Throwable) {
-                plugin.logger.warning("Player task failed: ${t.message}")
+                plugin.logger.log(java.util.logging.Level.WARNING, "Player task failed", t)
             }
         }
     }
 
-    private fun Player.sendBridgeMessage(message: String) {
-        runPlayer(this) { sendMessage(message) }
+    private fun Player.sendBridgeMessage(key: String, placeholders: Map<String, Any?> = emptyMap()) {
+        runPlayer(this) { messages.send(this, key, placeholders) }
     }
 
     private fun Player.canListOthers(): Boolean {
         return isOp || hasPermission(config.list.othersPermission) || hasPermission("residencebridge.admin")
     }
 
-    private fun formatMax(max: Int): String = if (max == Int.MAX_VALUE) "无限" else max.toString()
+    private fun formatMax(player: Player, max: Int): String =
+        if (max == Int.MAX_VALUE) messages.text(player, "common.unlimited") else max.toString()
 
     /**
      * 刻意不使用 data class：这个对象靠身份（引用）区分「哪一次等待」，

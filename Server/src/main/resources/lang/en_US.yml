@@ -1,0 +1,38 @@
+list:
+  header: "<color:#66ccff>Your network-wide residences <gray>(<white><count><gray>) <dark_gray>- <gray>Page <white><page><gray>/<white><max_page>"
+  other-header: "<color:#66ccff><target>'s network-wide residences <gray>(<white><count><gray>) <dark_gray>- <gray>Page <white><page><gray>/<white><max_page>"
+  line: "<gray>- <green><name> <dark_gray>[<white><server><dark_gray>] <gray><world>"
+  empty: "<yellow>You do not have any residences."
+residence:
+  duplicate: "<red>A residence with this name already exists: <white><name>"
+  not-found: "<red>Residence not found: <white><name>"
+  limit-reached: "<red>You have reached the network-wide residence limit: <white><count>/<max>"
+teleport:
+  switching: "<green>Connecting to the residence server: <white><server>"
+  connect-failed: "<red>Failed to connect to the target server. Please try again later."
+  server-not-found: "<red>The target server does not exist: <white><server>"
+  server-offline: "<red>The target server is offline or unreachable: <white><server>"
+  status-unavailable: "<red>Unable to verify the target server status. Please try again later."
+  wait: "<green>Teleporting in <white><seconds> <green>seconds. Do not move."
+  cancelled: "<red>Teleport cancelled."
+  local-failed: "<red>Local teleport failed. You may not have permission."
+remote:
+  switching: "<green>Connecting to the residence server to run the command: <white><server>"
+  queued: "<green>Arrived at the target server. Running the command."
+command:
+  no-permission: "<red>You do not have permission to do that."
+  reload-success: "<green>ResidenceBridge reloaded."
+  reload-failed: "<red>ResidenceBridge reload failed: <error>"
+  sync-start: "<green>ResidenceBridge sync started."
+  sync-success: "<green>ResidenceBridge synced <count> residences."
+  sync-failed: "<red>ResidenceBridge sync failed: <error>"
+common:
+  unlimited: "unlimited"
+debug:
+  plugin: "<gray>Residence plugin: <white><value>"
+  instance: "<gray>Residence instance class: <white><value>"
+  manager: "<gray>Residence manager class: <white><value>"
+  names: "<gray>Residence names: <white><count> <values>"
+  values: "<gray>Residence memory snapshots: <white><count>"
+  file-snapshots: "<gray>Residence file snapshots: <white><count> <values>"
+  snapshots: "<gray>Merged snapshots: <white><count> <values>"
