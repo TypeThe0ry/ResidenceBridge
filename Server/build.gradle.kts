@@ -1,71 +1,68 @@
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
-import io.izzel.taboolib.gradle.*
-import org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8
-import io.izzel.taboolib.gradle.Basic
-
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
 
 plugins {
     java
-    id("io.izzel.taboolib") version "2.0.27"
     id("org.jetbrains.kotlin.jvm") version "2.2.0"
-}
-
-taboolib {
-    env {
-        install(Basic)
-        install(Bukkit)
-    }
-    description {
-        name = "ResidenceBridge"
-        contributors {
-            name("ewsk")
-        }
-        dependencies {
-            name("Residence")
-        }
-    }
-    version { taboolib = "6.3.0-932e79c" }
-    relocate("com.zaxxer.hikari","org.ewsk.residencebridge.lib.hikari")
+    id("com.gradleup.shadow") version "9.4.1"
 }
 
 repositories {
     mavenCentral()
     maven("https://repo.extendedclip.com/content/repositories/placeholderapi/")
+    maven("https://repo.momirealms.net/releases/")
+    maven("https://repo.catnies.top/releases")
+    maven("https://repo.papermc.io/repository/maven-public/")
+    // maven("https://ptms.ink/repository/maven-releases/")  // TEMP: ptms.ink repo is down
 }
 
 dependencies {
-    compileOnly("ink.ptms.core:v12004:12004:mapped")
-    compileOnly("ink.ptms.core:v12004:12004:universal")
-    compileOnly(kotlin("stdlib"))
-    compileOnly(fileTree("libs"))
-    compileOnly("com.zaxxer:HikariCP:4.0.3")
+    // TEMP: ptms.ink repo is down; using Paper API for compile verification
+    compileOnly("io.papermc.paper:paper-api:1.20.4-R0.1-SNAPSHOT")
     compileOnly("me.clip:placeholderapi:2.11.6")
+
+    implementation(kotlin("stdlib"))
+    implementation("com.zaxxer:HikariCP:4.0.3")
+    implementation("com.mysql:mysql-connector-j:8.0.33")
+    implementation("net.momirealms:sparrow-reflection:0.34")
+    implementation("org.ow2.asm:asm:9.9.1")
+    implementation("net.momirealms:sparrow-yaml:1.0.12")
+
     testImplementation(kotlin("test-junit"))
-    //implementation("com.mysql:mysql-connector-j:8.0.33")
 }
 
 tasks.withType<JavaCompile> {
     options.encoding = "UTF-8"
 }
 
-tasks.jar {
-    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-    from({
-        configurations.runtimeClasspath.get()
-            .filter { it.name.endsWith(".jar") }
-            .map { zipTree(it) }
-    })
-    exclude("META-INF/*.RSA", "META-INF/*.SF", "META-INF/*.DSA")
-}
-
 tasks.withType<KotlinCompile> {
     compilerOptions {
-        jvmTarget.set(JVM_1_8)
+        jvmTarget.set(JVM_17)
         freeCompilerArgs.add("-Xjvm-default=all")
     }
 }
 
 java {
-    sourceCompatibility = JavaVersion.VERSION_1_8
-    targetCompatibility = JavaVersion.VERSION_1_8
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+tasks.jar {
+    enabled = false
+}
+
+tasks.shadowJar {
+    archiveBaseName.set("ResidenceBridge")
+    archiveClassifier.set("")
+    mergeServiceFiles()
+    relocate("com.zaxxer.hikari", "org.ewsk.residencebridge.lib.hikari")
+    relocate("com.mysql", "org.ewsk.residencebridge.lib.mysql")
+    relocate("net.momirealms.sparrow.reflection", "org.ewsk.residencebridge.lib.reflection")
+    relocate("org.objectweb.asm", "org.ewsk.residencebridge.lib.asm")
+    relocate("net.momirealms.sparrow.yaml", "org.ewsk.residencebridge.lib.yaml")
+    relocate("org.snakeyaml", "org.ewsk.residencebridge.lib.snakeyaml")
+}
+
+tasks.build {
+    dependsOn(tasks.shadowJar)
 }

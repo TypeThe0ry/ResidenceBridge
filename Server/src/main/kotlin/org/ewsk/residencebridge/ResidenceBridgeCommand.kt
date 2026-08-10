@@ -1,49 +1,52 @@
 package org.ewsk.residencebridge
 
-import taboolib.common.platform.ProxyCommandSender
-import taboolib.common.platform.command.CommandBody
-import taboolib.common.platform.command.CommandHeader
-import taboolib.common.platform.command.PermissionDefault
-import taboolib.common.platform.command.subCommand
+import org.bukkit.command.Command
+import org.bukkit.command.CommandExecutor
+import org.bukkit.command.CommandSender
+import java.util.Locale
 
-@CommandHeader(
-    name = "rb",
-    aliases = ["residencebridge"],
-    permission = "residencebridge.command",
-    permissionDefault = PermissionDefault.OP
-)
-object ResidenceBridgeCommand {
+object ResidenceBridgeCommand : CommandExecutor {
 
-    @CommandBody(permission = "residencebridge.command.reload", permissionDefault = PermissionDefault.OP)
-    val reload = subCommand {
-        execute<ProxyCommandSender> { sender, _, _ ->
-            try {
-                BridgePlugin.reload()
-                sender.sendMessage("ResidenceBridge reloaded.")
-            } catch (t: Throwable) {
-                sender.sendMessage("ResidenceBridge reload failed: ${t.message}")
-            }
-        }
-    }
-
-    @CommandBody(permission = "residencebridge.command.sync", permissionDefault = PermissionDefault.OP)
-    val sync = subCommand {
-        execute<ProxyCommandSender> { sender, _, _ ->
-            sender.sendMessage("ResidenceBridge sync started.")
-            BridgePlugin.syncNow { count, error ->
-                if (error == null) {
-                    sender.sendMessage("ResidenceBridge synced $count residences.")
-                } else {
-                    sender.sendMessage("ResidenceBridge sync failed: ${error.message}")
+    override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
+        val sub = args.firstOrNull()?.lowercase(Locale.ROOT) ?: return false
+        when (sub) {
+            "reload" -> {
+                if (!sender.hasPermission("residencebridge.command.reload")) {
+                    sender.sendMessage("你没有权限执行这个操作。")
+                    return true
                 }
+                try {
+                    BridgePlugin.reload()
+                    sender.sendMessage("ResidenceBridge reloaded.")
+                } catch (t: Throwable) {
+                    sender.sendMessage("ResidenceBridge reload failed: ${t.message}")
+                }
+                return true
+            }
+            "sync" -> {
+                if (!sender.hasPermission("residencebridge.command.sync")) {
+                    sender.sendMessage("你没有权限执行这个操作。")
+                    return true
+                }
+                sender.sendMessage("ResidenceBridge sync started.")
+                BridgePlugin.syncNow { count, error ->
+                    if (error == null) {
+                        sender.sendMessage("ResidenceBridge synced $count residences.")
+                    } else {
+                        sender.sendMessage("ResidenceBridge sync failed: ${error.message}")
+                    }
+                }
+                return true
+            }
+            "debug" -> {
+                if (!sender.hasPermission("residencebridge.command.debug")) {
+                    sender.sendMessage("你没有权限执行这个操作。")
+                    return true
+                }
+                ResidenceHook.diagnostics().forEach { sender.sendMessage(it) }
+                return true
             }
         }
-    }
-
-    @CommandBody(permission = "residencebridge.command.debug", permissionDefault = PermissionDefault.OP)
-    val debug = subCommand {
-        execute<ProxyCommandSender> { sender, _, _ ->
-            ResidenceHook.diagnostics().forEach { sender.sendMessage(it) }
-        }
+        return false
     }
 }

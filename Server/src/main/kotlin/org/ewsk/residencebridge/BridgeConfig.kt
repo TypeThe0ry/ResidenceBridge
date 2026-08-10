@@ -1,7 +1,9 @@
 package org.ewsk.residencebridge
 
-import org.bukkit.configuration.file.FileConfiguration
+import net.momirealms.sparrow.yaml.SparrowYaml
+import net.momirealms.sparrow.yaml.YamlDocument
 import org.bukkit.entity.Player
+import java.io.File
 import java.util.Locale
 
 data class BridgeConfig(
@@ -22,78 +24,84 @@ data class BridgeConfig(
     val messages: Messages
 ) {
     companion object {
-        fun load(config: FileConfiguration): BridgeConfig {
+        fun load(configFile: File): BridgeConfig {
+            val yaml = SparrowYaml.builder().build()
+            val doc = yaml.load(configFile.toPath())
             return BridgeConfig(
-                serverId = config.getString("server-id", "survival-1")!!.trim().lowercase(Locale.ROOT),
+                serverId = doc.getOrDefault(String::class.java, "survival-1", "server-id").trim().lowercase(Locale.ROOT),
                 mysql = MysqlConfig(
-                    host = config.getString("mysql.host", "127.0.0.1")!!,
-                    port = config.getInt("mysql.port", 3306),
-                    database = config.getString("mysql.database", "minecraft")!!,
-                    username = config.getString("mysql.username", "root")!!,
-                    password = config.getString("mysql.password", "password")!!,
-                    maximumPoolSize = config.getInt("mysql.maximum-pool-size", 10)
+                    host = doc.getOrDefault(String::class.java, "127.0.0.1", "mysql", "host"),
+                    port = doc.getOrDefault(Int::class.java, 3306, "mysql", "port"),
+                    database = doc.getOrDefault(String::class.java, "minecraft", "mysql", "database"),
+                    username = doc.getOrDefault(String::class.java, "root", "mysql", "username"),
+                    password = doc.getOrDefault(String::class.java, "password", "mysql", "password"),
+                    maximumPoolSize = doc.getOrDefault(Int::class.java, 10, "mysql", "maximum-pool-size")
                 ),
-                syncInitialDelayTicks = config.getLong("sync.initial-delay-ticks", 40L),
-                syncIntervalSeconds = config.getLong("sync.interval-seconds", 60L),
-                syncLogSuccess = config.getBoolean("sync.log-success", false),
-                pendingExpireSeconds = config.getLong("teleport.pending-expire-seconds", 30L),
-                joinDelayTicks = config.getLong("teleport.join-delay-ticks", 0L),
+                syncInitialDelayTicks = doc.getOrDefault(Long::class.java, 40L, "sync", "initial-delay-ticks"),
+                syncIntervalSeconds = doc.getOrDefault(Long::class.java, 60L, "sync", "interval-seconds"),
+                syncLogSuccess = doc.getOrDefault(Boolean::class.java, false, "sync", "log-success"),
+                pendingExpireSeconds = doc.getOrDefault(Long::class.java, 30L, "teleport", "pending-expire-seconds"),
+                joinDelayTicks = doc.getOrDefault(Long::class.java, 0L, "teleport", "join-delay-ticks"),
                 teleportWait = TeleportWaitConfig(
-                    enabled = config.getBoolean("teleport.wait.enabled", true),
-                    defaultSeconds = config.getInt("teleport.wait.default-seconds", 3),
-                    bypassPermission = config.getString("teleport.wait.bypass-permission", "residencebridge.teleport.bypass")!!,
-                    cancelOnMove = config.getBoolean("teleport.wait.cancel-on-move", true),
-                    cancelOnDamage = config.getBoolean("teleport.wait.cancel-on-damage", true),
-                    countdownSound = config.getString("teleport.wait.countdown-sound", "BLOCK_NOTE_BLOCK_PLING")!!,
-                    countdownSoundVolume = config.getDouble("teleport.wait.countdown-sound-volume", 1.0).toFloat(),
-                    countdownSoundPitch = config.getDouble("teleport.wait.countdown-sound-pitch", 1.2).toFloat(),
-                    rules = config.permissionIntRules("teleport.wait.groups", "seconds")
+                    enabled = doc.getOrDefault(Boolean::class.java, true, "teleport", "wait", "enabled"),
+                    defaultSeconds = doc.getOrDefault(Int::class.java, 3, "teleport", "wait", "default-seconds"),
+                    bypassPermission = doc.getOrDefault(String::class.java, "residencebridge.teleport.bypass", "teleport", "wait", "bypass-permission"),
+                    cancelOnMove = doc.getOrDefault(Boolean::class.java, true, "teleport", "wait", "cancel-on-move"),
+                    cancelOnDamage = doc.getOrDefault(Boolean::class.java, true, "teleport", "wait", "cancel-on-damage"),
+                    countdownSound = doc.getOrDefault(String::class.java, "BLOCK_NOTE_BLOCK_PLING", "teleport", "wait", "countdown-sound"),
+                    countdownSoundVolume = doc.getOrDefault(Double::class.java, 1.0, "teleport", "wait", "countdown-sound-volume").toFloat(),
+                    countdownSoundPitch = doc.getOrDefault(Double::class.java, 1.2, "teleport", "wait", "countdown-sound-pitch").toFloat(),
+                    rules = doc.permissionIntRules("teleport", "wait", "groups", valueKey = "seconds")
                 ),
                 limits = ResidenceLimitConfig(
-                    defaultMaxResidences = config.getInt("limits.default-max-residences", 3),
-                    bypassPermission = config.getString("limits.bypass-permission", "residencebridge.limit.bypass")!!,
-                    rules = config.permissionIntRules("limits.groups", "max-residences")
+                    defaultMaxResidences = doc.getOrDefault(Int::class.java, 3, "limits", "default-max-residences"),
+                    bypassPermission = doc.getOrDefault(String::class.java, "residencebridge.limit.bypass", "limits", "bypass-permission"),
+                    rules = doc.permissionIntRules("limits", "groups", valueKey = "max-residences")
                 ),
                 list = ListConfig(
-                    pageSize = config.getInt("list.page-size", 8).coerceAtLeast(1),
-                    othersPermission = config.getString("list.others-permission", "residencebridge.list.others")!!,
-                    header = config.message("list.header", "&6你的全区领地列表 &7(&f%count%&7) &8- &7第 &f%page%&7/&f%max_page% &7页"),
-                    otherHeader = config.message("list.other-header", "&6%target% 的全区领地列表 &7(&f%count%&7) &8- &7第 &f%page%&7/&f%max_page% &7页"),
-                    line = config.message("list.line", "&7- &a%name% &8[&f%server%&8]"),
-                    empty = config.message("list.empty", "&e你还没有任何领地。")
+                    pageSize = doc.getOrDefault(Int::class.java, 8, "list", "page-size").coerceAtLeast(1),
+                    othersPermission = doc.getOrDefault(String::class.java, "residencebridge.list.others", "list", "others-permission"),
+                    header = doc.message("list", "header", default = "&6你的全区领地列表 &7(&f%count%&7) &8- &7第 &f%page%&7/&f%max_page% &7页"),
+                    otherHeader = doc.message("list", "other-header", default = "&6%target% 的全区领地列表 &7(&f%count%&7) &8- &7第 &f%page%&7/&f%max_page% &7页"),
+                    line = doc.message("list", "line", default = "&7- &a%name% &8[&f%server%&8]"),
+                    empty = doc.message("list", "empty", default = "&e你还没有任何领地。")
                 ),
-                remoteActionCommands = config.getStringList("remote-action-commands")
-                    .ifEmpty { listOf("rename", "give", "remove", "delete") }
-                    .map { it.lowercase(Locale.ROOT) }
-                    .toSet(),
-                placeholderCacheSeconds = config.getLong("placeholder.cache-seconds", 30L).coerceAtLeast(1L),
-                velocityChannel = config.getString("velocity.channel", "residencebridge:main")!!,
-                fallbackBungeeChannel = config.getBoolean("velocity.fallback-bungee-channel", true),
+                remoteActionCommands = doc.getSequenceOrNull("remote-action-commands")
+                    ?.value()
+                    ?.mapNotNull { it.value()?.toString() }
+                    ?.ifEmpty { listOf("rename", "give", "remove", "delete") }
+                    ?.map { it.lowercase(Locale.ROOT) }
+                    ?.toSet()
+                    ?: setOf("rename", "give", "remove", "delete"),
+                placeholderCacheSeconds = doc.getOrDefault(Long::class.java, 30L, "placeholder", "cache-seconds").coerceAtLeast(1L),
+                velocityChannel = doc.getOrDefault(String::class.java, "residencebridge:main", "velocity", "channel"),
+                fallbackBungeeChannel = doc.getOrDefault(Boolean::class.java, true, "velocity", "fallback-bungee-channel"),
                 messages = Messages(
-                    duplicate = config.message("messages.duplicate", "&c全服已存在同名领地：&f%name%"),
-                    notFound = config.message("messages.not-found", "&c没有找到这个领地：&f%name%"),
-                    switching = config.message("messages.switching", "&a正在传送到领地所在服务器：&f%server%"),
-                    localTeleportFailed = config.message("messages.local-teleport-failed", "&c你没有权限执行这个操作。"),
-                    connectRequestFailed = config.message("messages.connect-request-failed", "&c跨服传送请求失败，请稍后再试。"),
-                    limitReached = config.message("messages.limit-reached", "&c你的全区领地数量已达上限：&f%count%/%max%"),
-                    teleportWait = config.message("messages.teleport-wait", "&a传送将在 &f%seconds% &a秒后开始，请不要移动。"),
-                    teleportCancelled = config.message("messages.teleport-cancelled", "&c传送已取消。"),
-                    remoteActionSwitching = config.message("messages.remote-action-switching", "&a正在切换到领地所在服务器执行指令：&f%server%"),
-                    remoteActionQueued = config.message("messages.remote-action-queued", "&a已到达目标服务器，正在执行指令。"),
-                    noPermission = config.message("messages.no-permission", "&c你没有权限执行这个操作。")
+                    duplicate = doc.message("messages", "duplicate", default = "&c全服已存在同名领地：&f%name%"),
+                    notFound = doc.message("messages", "not-found", default = "&c没有找到这个领地：&f%name%"),
+                    switching = doc.message("messages", "switching", default = "&a正在传送到领地所在服务器：&f%server%"),
+                    localTeleportFailed = doc.message("messages", "local-teleport-failed", default = "&c你没有权限执行这个操作。"),
+                    connectRequestFailed = doc.message("messages", "connect-request-failed", default = "&c跨服传送请求失败，请稍后再试。"),
+                    limitReached = doc.message("messages", "limit-reached", default = "&c你的全区领地数量已达上限：&f%count%/%max%"),
+                    teleportWait = doc.message("messages", "teleport-wait", default = "&a传送将在 &f%seconds% &a秒后开始，请不要移动。"),
+                    teleportCancelled = doc.message("messages", "teleport-cancelled", default = "&c传送已取消。"),
+                    remoteActionSwitching = doc.message("messages", "remote-action-switching", default = "&a正在切换到领地所在服务器执行指令：&f%server%"),
+                    remoteActionQueued = doc.message("messages", "remote-action-queued", default = "&a已到达目标服务器，正在执行指令。"),
+                    noPermission = doc.message("messages", "no-permission", default = "&c你没有权限执行这个操作。")
                 )
             )
         }
 
-        private fun FileConfiguration.message(path: String, default: String): String {
-            return MessageUtil.color(getString(path, default)!!)
+        private fun YamlDocument.message(vararg path: String, default: String): String {
+            return MessageUtil.color(getOrDefault(String::class.java, default, *path))
         }
 
-        private fun FileConfiguration.permissionIntRules(path: String, valueKey: String): List<PermissionIntRule> {
-            val section = getConfigurationSection(path) ?: return emptyList()
-            return section.getKeys(false).mapNotNull { key ->
-                val permission = section.getString("$key.permission") ?: return@mapNotNull null
-                val value = section.getInt("$key.$valueKey")
+        private fun YamlDocument.permissionIntRules(vararg path: String, valueKey: String): List<PermissionIntRule> {
+            val section = getSectionOrNull(*path) ?: return emptyList()
+            return section.getValues().keys.mapNotNull { key ->
+                val permission = getOrDefault(String::class.java, null, *path, key, "permission")
+                    ?: return@mapNotNull null
+                val value = getOrDefault(Int::class.java, 0, *path, key, valueKey)
                 PermissionIntRule(permission, value)
             }
         }

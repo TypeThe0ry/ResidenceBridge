@@ -1,32 +1,46 @@
 package org.ewsk.residencebridgevelocity
 
+import com.velocitypowered.api.event.Subscribe
 import com.velocitypowered.api.event.connection.PluginMessageEvent
+import com.velocitypowered.api.event.proxy.ProxyInitializeEvent
+import com.velocitypowered.api.event.proxy.ProxyShutdownEvent
+import com.velocitypowered.api.plugin.Plugin
 import com.velocitypowered.api.proxy.Player
+import com.velocitypowered.api.proxy.ProxyServer
 import com.velocitypowered.api.proxy.ServerConnection
 import com.velocitypowered.api.proxy.messages.MinecraftChannelIdentifier
-import taboolib.common.platform.Plugin
-import taboolib.common.platform.event.SubscribeEvent
-import taboolib.common.platform.function.info
-import taboolib.common.platform.function.warning
-import taboolib.platform.VelocityPlugin
+import org.slf4j.Logger
+import javax.inject.Inject
 
-object ResidenceBridgeVelocity : Plugin() {
+@Plugin(
+    id = "residencebridge-velocity",
+    name = "ResidenceBridge-Velocity",
+    version = "1.2.4",
+    authors = ["29622"]
+)
+class ResidenceBridgeVelocity @Inject constructor(
+    private val proxy: ProxyServer,
+    private val logger: Logger
+) {
 
     private val channel = MinecraftChannelIdentifier.from("residencebridge:main")
 
-    override fun onEnable() {
-        val velocity = VelocityPlugin.getInstance()
-        velocity.server.channelRegistrar.register(channel)
-        info("ResidenceBridge-Velocity enabled.")
+    @Subscribe
+    fun onProxyInitialization(event: ProxyInitializeEvent) {
+        proxy.channelRegistrar.register(channel)
+        proxy.eventManager.register(this, PluginMessageEvent::class.java) { messageEvent ->
+            handlePluginMessage(messageEvent)
+            messageEvent
+        }
+        logger.info("ResidenceBridge-Velocity enabled.")
     }
 
-    override fun onDisable() {
-        val velocity = VelocityPlugin.getInstance()
-        velocity.server.channelRegistrar.unregister(channel)
+    @Subscribe
+    fun onProxyShutdown(event: ProxyShutdownEvent) {
+        proxy.channelRegistrar.unregister(channel)
     }
 
-    @SubscribeEvent
-    fun onPluginMessage(event: PluginMessageEvent) {
+    private fun handlePluginMessage(event: PluginMessageEvent) {
         if (event.identifier != channel) {
             return
         }
@@ -39,16 +53,15 @@ object ResidenceBridgeVelocity : Plugin() {
         if (targetServer.isEmpty()) {
             return
         }
-        val proxy = VelocityPlugin.getInstance().server
         val server = proxy.getServer(targetServer).orElseGet {
             proxy.allServers.firstOrNull { it.serverInfo.name.equals(targetServer, ignoreCase = true) }
         }
         if (server == null) {
-            warning("Target server not found: $targetServer")
+            logger.warn("Target server not found: $targetServer")
             return
         }
         player.createConnectionRequest(server).connect().exceptionally {
-            warning("Failed to connect ${player.username} to $targetServer: ${it.message}")
+            logger.warn("Failed to connect ${player.username} to $targetServer: ${it.message}")
             null
         }
     }

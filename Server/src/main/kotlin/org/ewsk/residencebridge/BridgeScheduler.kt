@@ -4,7 +4,10 @@ import org.bukkit.Bukkit
 import org.bukkit.entity.Player
 import org.bukkit.plugin.Plugin
 import org.bukkit.scheduler.BukkitTask
-import taboolib.common.platform.function.warning
+import java.lang.invoke.MethodHandle
+import java.lang.invoke.MethodHandles
+import java.lang.reflect.Method
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.function.Consumer
@@ -12,9 +15,18 @@ import java.util.function.Consumer
 class BridgeTask(private val delegate: Any?, private val cancelAction: (() -> Unit)? = null) {
     fun cancel() {
         try {
-            cancelAction?.invoke() ?: delegate?.javaClass?.getMethod("cancel")?.invoke(delegate)
+            cancelAction?.invoke() ?: delegate?.let { target ->
+                val method = cancelMethodCache.computeIfAbsent(target.javaClass) { clazz ->
+                    runCatching { clazz.getMethod("cancel") }.getOrNull()
+                }
+                method?.invoke(target)
+            }
         } catch (_: Throwable) {
         }
+    }
+
+    private companion object {
+        private val cancelMethodCache = ConcurrentHashMap<Class<*>, Method?>()
     }
 }
 
@@ -30,6 +42,40 @@ object BridgeScheduler {
             false
         }
     }
+
+    // ===== Folia 反射缓存 =====
+    private val foliaGlobalScheduler: Any? by lazy {
+        if (!folia) null else Bukkit::class.java.getMethod("getGlobalRegionScheduler").invoke(null)
+    }
+    private val foliaGlobalRun: Method? by lazy {
+        if (!folia) null else foliaGlobalScheduler?.javaClass?.getMethod("run", Plugin::class.java, Consumer::class.java)
+    }
+    private val foliaGlobalRunDelayed: Method? by lazy {
+        if (!folia) null else foliaGlobalScheduler?.javaClass?.getMethod("runDelayed", Plugin::class.java, Consumer::class.java, java.lang.Long.TYPE)
+    }
+    private val foliaGlobalRunAtFixedRate: Method? by lazy {
+        if (!folia) null else foliaGlobalScheduler?.javaClass?.getMethod("runAtFixedRate", Plugin::class.java, Consumer::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE)
+    }
+    private val foliaPlayerGetScheduler: Method? by lazy {
+        if (!folia) null else Player::class.java.getMethod("getScheduler")
+    }
+    private val foliaPlayerSchedulerClass: Class<*>? by lazy {
+        if (!folia) null else foliaPlayerGetScheduler?.returnType
+    }
+    private val foliaPlayerRun: Method? by lazy {
+        if (!folia) null else foliaPlayerSchedulerClass?.getMethod("run", Plugin::class.java, Consumer::class.java, Runnable::class.java)
+    }
+    private val foliaPlayerRunDelayed: Method? by lazy {
+        if (!folia) null else foliaPlayerSchedulerClass?.getMethod("runDelayed", Plugin::class.java, Consumer::class.java, Runnable::class.java, java.lang.Long.TYPE)
+    }
+
+    // ===== MethodHandle 缓存（unreflect 一次，后续调用免去 Method.invoke 的可见性检查） =====
+    private val foliaGlobalRunHandle: MethodHandle? by lazy { foliaGlobalRun?.let { MethodHandles.lookup().unreflect(it) } }
+    private val foliaGlobalRunDelayedHandle: MethodHandle? by lazy { foliaGlobalRunDelayed?.let { MethodHandles.lookup().unreflect(it) } }
+    private val foliaGlobalRunAtFixedRateHandle: MethodHandle? by lazy { foliaGlobalRunAtFixedRate?.let { MethodHandles.lookup().unreflect(it) } }
+    private val foliaPlayerGetSchedulerHandle: MethodHandle? by lazy { foliaPlayerGetScheduler?.let { MethodHandles.lookup().unreflect(it) } }
+    private val foliaPlayerRunHandle: MethodHandle? by lazy { foliaPlayerRun?.let { MethodHandles.lookup().unreflect(it) } }
+    private val foliaPlayerRunDelayedHandle: MethodHandle? by lazy { foliaPlayerRunDelayed?.let { MethodHandles.lookup().unreflect(it) } }
 
     fun init(plugin: Plugin) {
         this.plugin = plugin
@@ -48,7 +94,9 @@ object BridgeScheduler {
             try {
                 block()
             } catch (t: Throwable) {
-                warning("Async task failed: ${t.message}")
+                if (::plugin.isInitialized) {
+                    plugin.logger.warning("Async task failed: ${t.message}")
+                }
             }
         }
     }
@@ -62,13 +110,11 @@ object BridgeScheduler {
             }
             return BridgeTask(task) { task.cancel() }
         }
-        val scheduler = Bukkit::class.java.getMethod("getGlobalRegionScheduler").invoke(null)
         val consumer = Consumer<Any> { block() }
         val task = if (delayTicks <= 0L) {
-            scheduler.javaClass.getMethod("run", Plugin::class.java, Consumer::class.java).invoke(scheduler, plugin, consumer)
+            foliaGlobalRunHandle!!.invokeWithArguments(foliaGlobalScheduler, plugin, consumer)
         } else {
-            scheduler.javaClass.getMethod("runDelayed", Plugin::class.java, Consumer::class.java, java.lang.Long.TYPE)
-                .invoke(scheduler, plugin, consumer, delayTicks)
+            foliaGlobalRunDelayedHandle!!.invokeWithArguments(foliaGlobalScheduler, plugin, consumer, delayTicks)
         }
         return BridgeTask(task)
     }
@@ -82,15 +128,13 @@ object BridgeScheduler {
             }
             return BridgeTask(task) { task.cancel() }
         }
-        val scheduler = player.javaClass.getMethod("getScheduler").invoke(player)
+        val scheduler = foliaPlayerGetSchedulerHandle!!.invokeWithArguments(player)
         val consumer = Consumer<Any> { block() }
         val retired = Runnable { }
         val task = if (delayTicks <= 0L) {
-            scheduler.javaClass.getMethod("run", Plugin::class.java, Consumer::class.java, Runnable::class.java)
-                .invoke(scheduler, plugin, consumer, retired)
+            foliaPlayerRunHandle!!.invokeWithArguments(scheduler, plugin, consumer, retired)
         } else {
-            scheduler.javaClass.getMethod("runDelayed", Plugin::class.java, Consumer::class.java, Runnable::class.java, java.lang.Long.TYPE)
-                .invoke(scheduler, plugin, consumer, retired, delayTicks)
+            foliaPlayerRunDelayedHandle!!.invokeWithArguments(scheduler, plugin, consumer, retired, delayTicks)
         }
         return BridgeTask(task)
     }
@@ -100,15 +144,14 @@ object BridgeScheduler {
             val task: BukkitTask = Bukkit.getScheduler().runTaskTimer(plugin, Runnable(block), initialDelayTicks, periodTicks)
             return BridgeTask(task) { task.cancel() }
         }
-        val scheduler = Bukkit::class.java.getMethod("getGlobalRegionScheduler").invoke(null)
         val consumer = Consumer<Any> { block() }
-        val task = scheduler.javaClass.getMethod(
-            "runAtFixedRate",
-            Plugin::class.java,
-            Consumer::class.java,
-            java.lang.Long.TYPE,
-            java.lang.Long.TYPE
-        ).invoke(scheduler, plugin, consumer, initialDelayTicks.coerceAtLeast(1L), periodTicks.coerceAtLeast(1L))
+        val task = foliaGlobalRunAtFixedRateHandle!!.invokeWithArguments(
+            foliaGlobalScheduler,
+            plugin,
+            consumer,
+            initialDelayTicks.coerceAtLeast(1L),
+            periodTicks.coerceAtLeast(1L)
+        )
         return BridgeTask(task)
     }
 }

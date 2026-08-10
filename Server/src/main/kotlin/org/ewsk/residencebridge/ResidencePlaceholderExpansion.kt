@@ -11,6 +11,7 @@ class ResidencePlaceholderExpansion(
 ) : PlaceholderExpansion() {
 
     private val cache = ConcurrentHashMap<UUID, CachedPlaceholderData>()
+    private val refreshing = ConcurrentHashMap.newKeySet<UUID>()
 
     override fun getIdentifier(): String = "reslink"
 
@@ -40,18 +41,43 @@ class ResidencePlaceholderExpansion(
 
     private fun dataFor(player: Player): CachedPlaceholderData {
         val now = System.currentTimeMillis()
-        val cached = cache[player.uniqueId]
-        if (cached != null && cached.expireAt > now) {
+        val uuid = player.uniqueId
+        val cached = cache[uuid]
+        if (cached != null) {
+            if (cached.expireAt > now) {
+                return cached
+            }
+            // 过期：返回旧值并异步刷新
+            triggerRefresh(player)
             return cached
         }
-        val list = database.listResidencesByOwner(player.uniqueId, player.name, 1, 256)
-        val data = CachedPlaceholderData(
-            total = list.total,
-            names = list.entries.map { it.displayName },
-            expireAt = now + config.placeholderCacheSeconds * 1000L
-        )
-        cache[player.uniqueId] = data
-        return data
+        // 首次无缓存：返回空值并异步加载
+        triggerRefresh(player)
+        return EMPTY_DATA
+    }
+
+    private fun triggerRefresh(player: Player) {
+        val uuid = player.uniqueId
+        if (!refreshing.add(uuid)) return
+        val playerName = player.name
+        BridgeScheduler.runAsync {
+            try {
+                val list = database.listResidencesByOwner(uuid, playerName, 1, 256)
+                val now = System.currentTimeMillis()
+                cache[uuid] = CachedPlaceholderData(
+                    total = list.total,
+                    names = list.entries.map { it.displayName },
+                    expireAt = now + config.placeholderCacheSeconds * 1000L
+                )
+            } catch (_: Throwable) {
+            } finally {
+                refreshing.remove(uuid)
+            }
+        }
+    }
+
+    private companion object {
+        val EMPTY_DATA = CachedPlaceholderData(0, emptyList(), 0L)
     }
 
     private data class CachedPlaceholderData(

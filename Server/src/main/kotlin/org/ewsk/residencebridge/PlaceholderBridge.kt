@@ -1,13 +1,13 @@
 package org.ewsk.residencebridge
 
 import org.bukkit.Bukkit
-import taboolib.common.platform.function.info
+import org.bukkit.plugin.Plugin
 
 object PlaceholderBridge {
 
     private var expansion: Any? = null
 
-    fun register(config: BridgeConfig, database: BridgeDatabase) {
+    fun register(plugin: Plugin, config: BridgeConfig, database: BridgeDatabase) {
         if (Bukkit.getPluginManager().getPlugin("PlaceholderAPI") == null) {
             return
         }
@@ -15,7 +15,7 @@ object PlaceholderBridge {
             val created = ResidencePlaceholderExpansion(config, database)
             created.register()
             expansion = created
-            info("PlaceholderAPI placeholders registered.")
+            plugin.logger.info("PlaceholderAPI placeholders registered.")
         } catch (t: Throwable) {
             expansion = null
         }

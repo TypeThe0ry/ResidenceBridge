@@ -1,0 +1,7 @@
+{
+  "id": "residencebridge-velocity",
+  "name": "ResidenceBridge-Velocity",
+  "version": "1.2.4",
+  "authors": ["29622"],
+  "main": "org.ewsk.residencebridgevelocity.ResidenceBridgeVelocity"
+}

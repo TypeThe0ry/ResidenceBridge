@@ -17,15 +17,14 @@ import org.bukkit.event.player.PlayerQuitEvent
 import org.bukkit.event.server.TabCompleteEvent
 import org.bukkit.plugin.EventExecutor
 import org.bukkit.plugin.Plugin
-import taboolib.common.platform.event.SubscribeEvent
-import taboolib.common.platform.function.info
-import taboolib.common.platform.function.warning
-import taboolib.platform.BukkitPlugin
+import org.bukkit.plugin.java.JavaPlugin
+import java.io.File
 import java.util.Collections
 import java.util.WeakHashMap
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 
 object BridgePlugin {
 
@@ -43,6 +42,10 @@ object BridgePlugin {
     private val pendingArrivalTeleports = ConcurrentHashMap<UUID, String>()
     private val residenceEventListener = object : Listener {}
     private val commandOverrideListener = object : Listener {}
+    private val teleportWaitListener = object : Listener {}
+    private var teleportWaitListenerRegistered = false
+    private val bridgeListener = object : Listener {}
+    private var bridgeEventsRegistered = false
     private val handledCommandEvents = Collections.synchronizedMap(WeakHashMap<PlayerCommandPreprocessEvent, Boolean>())
     private val originalResidenceCommands = ConcurrentHashMap<String, Command>()
     private var residenceEventsRegistered = false
@@ -55,10 +58,29 @@ object BridgePlugin {
     private var residenceCompletionEntries: List<ResidenceIndexEntry> = emptyList()
     @Volatile
     private var ownerCompletionNames: List<String> = emptyList()
+    private val completionNamesByPlayer = ConcurrentHashMap<UUID, List<String>>()
+    @Volatile
+    private var lastCompletionVersion = -1L
 
-    fun enable() {
-        plugin = BukkitPlugin.getInstance()
-        plugin.saveDefaultConfig()
+    // ===== completion 有序索引（TreeSet 增量维护，避免每次 add/remove 全量重建排序） =====
+    private val completionNameOrder = java.util.TreeSet<String>(String.CASE_INSENSITIVE_ORDER)
+    private val completionEntryOrder = java.util.TreeSet<String>(String.CASE_INSENSITIVE_ORDER)
+    private val completionEntriesByKey = ConcurrentHashMap<String, ResidenceIndexEntry>()
+    private val completionOwnerOrder = java.util.TreeSet<String>(String.CASE_INSENSITIVE_ORDER)
+
+    // ===== 增量同步指纹（nameKey -> 内容指纹），用于跳过未变化的快照写入 =====
+    private val snapshotFingerprints = ConcurrentHashMap<String, Long>()
+
+    // ===== 事件驱动写入的批量合并队列（定期 flush，减少零散连接） =====
+    private val pendingSnapshotWrites = ConcurrentLinkedQueue<ResidenceSnapshot>()
+    private val pendingDeletes = ConcurrentLinkedQueue<String>()
+    private val writeFlushLock = Any()
+    @Volatile
+    private var writeFlusherScheduled = false
+
+    fun enable(javaPlugin: JavaPlugin) {
+        plugin = javaPlugin
+        javaPlugin.saveDefaultConfig()
         start()
     }
 
@@ -77,23 +99,22 @@ object BridgePlugin {
             callback(0, IllegalStateException("ResidenceBridge database is not initialized."))
             return
         }
-        BridgeScheduler.runGlobal {
-            val snapshots = localSnapshots()
-            runAsync {
-                try {
-                    database.syncServerSnapshots(snapshots)
-                    refreshCompletionCache()
-                    callback(snapshots.size, null)
-                } catch (t: Throwable) {
-                    callback(0, t)
-                }
+        // 快照收集与数据库写入全部在异步线程完成，主线程仅触发
+        runAsync {
+            try {
+                val data = localSyncData()
+                database.syncServerSnapshots(data.changed, data.knownKeys)
+                refreshCompletionCache(async = false)
+                runGlobal { callback(data.changed.size, null) }
+            } catch (t: Throwable) {
+                runGlobal { callback(0, t) }
             }
         }
     }
 
     private fun start() {
         BridgeScheduler.init(plugin)
-        config = BridgeConfig.load(plugin.config)
+        config = BridgeConfig.load(File(plugin.dataFolder, "config.yml"))
         database = BridgeDatabase(config)
         database.initTables()
         messenger = VelocityMessenger(plugin, config)
@@ -101,8 +122,11 @@ object BridgePlugin {
         registerCommandMapOverride()
         registerCommandOverride()
         registerResidenceEvents()
-        PlaceholderBridge.register(config, database)
+        registerBridgeEvents()
+        (plugin as? JavaPlugin)?.getCommand("rb")?.setExecutor(ResidenceBridgeCommand)
+        PlaceholderBridge.register(plugin, config, database)
         scheduleSync()
+        lastCompletionVersion = -1L
         refreshCompletionCache()
     }
 
@@ -116,18 +140,27 @@ object BridgePlugin {
         residenceCompletionNames = emptyList()
         residenceCompletionEntries = emptyList()
         ownerCompletionNames = emptyList()
+        completionNamesByPlayer.clear()
         handledCommandEvents.clear()
         restoreCommandMapOverride()
         HandlerList.unregisterAll(commandOverrideListener)
         commandOverrideRegistered = false
         HandlerList.unregisterAll(residenceEventListener)
         residenceEventsRegistered = false
+        HandlerList.unregisterAll(teleportWaitListener)
+        teleportWaitListenerRegistered = false
+        HandlerList.unregisterAll(bridgeListener)
+        bridgeEventsRegistered = false
         PlaceholderBridge.unregister()
         if (::messenger.isInitialized) {
             messenger.unregister()
         }
         if (::database.isInitialized) {
-            database.close()
+            try {
+                flushPendingWritesSynchronously()
+            } finally {
+                database.close()
+            }
         }
         BridgeScheduler.shutdown()
     }
@@ -204,8 +237,7 @@ object BridgePlugin {
         return suggestions.distinct().sortedWith(String.CASE_INSENSITIVE_ORDER).toMutableList()
     }
 
-    @SubscribeEvent
-    fun onTabComplete(event: TabCompleteEvent) {
+    private fun onTabComplete(event: TabCompleteEvent) {
         if (!event.buffer.startsWith("/")) {
             return
         }
@@ -229,32 +261,22 @@ object BridgePlugin {
         }
     }
 
-    @SubscribeEvent
-    fun onJoin(event: PlayerJoinEvent) {
+    private fun onJoin(event: PlayerJoinEvent) {
         val player = event.player
         val uuid = player.uniqueId
         runAsync {
-            val pendingTeleport = database.consumePending(uuid)
-            if (pendingTeleport != null) {
-                scheduleNativeArrivalTeleport(player, pendingTeleport.residenceName)
-            }
-        }
-        runAsync {
-            val pendingActions = database.consumePendingActions(uuid)
-            if (pendingActions.isEmpty()) {
-                return@runAsync
-            }
-            runPlayer(player, config.joinDelayTicks) {
-                pendingActions.forEach { executePendingAction(player, it) }
+            val data = database.consumePendingForJoin(uuid)
+            data.pendingTeleport?.let { scheduleNativeArrivalTeleport(player, it.residenceName) }
+            if (data.pendingActions.isNotEmpty()) {
+                runPlayer(player, config.joinDelayTicks) {
+                    data.pendingActions.forEach { executePendingAction(player, it) }
+                }
             }
         }
     }
 
-    @SubscribeEvent
-    fun onMove(event: PlayerMoveEvent) {
-        if (!config.teleportWait.cancelOnMove) {
-            return
-        }
+    private fun handleMove(event: PlayerMoveEvent) {
+        if (waitingTeleports.isEmpty()) return
         val waiting = waitingTeleports[event.player.uniqueId] ?: return
         val to = event.to ?: return
         if (waiting.worldName != to.world?.name || waiting.x != to.blockX || waiting.y != to.blockY || waiting.z != to.blockZ) {
@@ -262,21 +284,18 @@ object BridgePlugin {
         }
     }
 
-    @SubscribeEvent
-    fun onDamage(event: EntityDamageEvent) {
-        if (!config.teleportWait.cancelOnDamage) {
-            return
-        }
+    private fun handleDamage(event: EntityDamageEvent) {
+        if (waitingTeleports.isEmpty()) return
         val player = event.entity as? Player ?: return
         if (waitingTeleports.containsKey(player.uniqueId)) {
             cancelWaitingTeleport(player)
         }
     }
 
-    @SubscribeEvent
-    fun onQuit(event: PlayerQuitEvent) {
+    private fun onQuit(event: PlayerQuitEvent) {
         waitingTeleports.remove(event.player.uniqueId)?.cancelTasks()
         pendingArrivalTeleports.remove(event.player.uniqueId)
+        unregisterTeleportWaitListenerIfEmpty()
     }
 
     private fun handleList(event: PlayerCommandPreprocessEvent, parsed: ParsedResidenceCommand) {
@@ -394,7 +413,7 @@ object BridgePlugin {
             if (snapshot != null) {
                 localDeleteTombstones.remove(snapshot.nameKey)
                 addCompletion(snapshot.name, snapshot.ownerUuid, snapshot.ownerName)
-                database.upsertSnapshot(snapshot)
+                enqueueWrite(snapshot)
             } else if (rollbackIfMissing) {
                 removeCompletion(name)
                 database.deleteReservationIfLocal(name)
@@ -421,7 +440,6 @@ object BridgePlugin {
                     teleportLocation = localSnapshot.teleportLocation
                 )
             )
-            runAsync { database.upsertSnapshot(localSnapshot) }
             return
         }
         runAsync {
@@ -448,6 +466,7 @@ object BridgePlugin {
         val waiting = WaitingTeleport(entry, location.world?.name, location.blockX, location.blockY, location.blockZ)
         waitingTeleports.remove(player.uniqueId)?.cancelTasks()
         waitingTeleports[player.uniqueId] = waiting
+        ensureTeleportWaitListenerRegistered()
         for (remaining in seconds downTo 1) {
             val delay = (seconds - remaining) * 20L
             waiting.tasks += runPlayer(player, delay) {
@@ -463,12 +482,14 @@ object BridgePlugin {
                 active.cancelTasks()
                 executeTeleport(player, entry)
             }
+            unregisterTeleportWaitListenerIfEmpty()
         }
     }
 
     private fun cancelWaitingTeleport(player: Player) {
         waitingTeleports.remove(player.uniqueId)?.cancelTasks() ?: return
         player.sendMessage(config.messages.teleportCancelled)
+        unregisterTeleportWaitListenerIfEmpty()
     }
 
     private fun executeTeleport(player: Player, entry: ResidenceIndexEntry) {
@@ -625,7 +646,7 @@ object BridgePlugin {
         val snapshot = ResidenceHook.toSnapshot(name) ?: return
         runAsync {
             localDeleteTombstones.remove(snapshot.nameKey)
-            database.upsertSnapshot(snapshot)
+            enqueueWrite(snapshot)
         }
     }
 
@@ -652,7 +673,7 @@ object BridgePlugin {
             return false
         }
         markLocalDeleted(name)
-        runAsync { database.delete(name) }
+        enqueueDelete(name)
         return true
     }
 
@@ -696,16 +717,18 @@ object BridgePlugin {
 
     private fun scheduleSync() {
         syncTask = BridgeScheduler.runGlobalTimer(config.syncInitialDelayTicks, config.syncIntervalSeconds * 20L) {
-            val snapshots = localSnapshots()
             runAsync {
                 try {
-                    database.syncServerSnapshots(snapshots)
-                    refreshCompletionCache()
-                    if (config.syncLogSuccess || snapshots.isEmpty()) {
-                        info("Synced ${snapshots.size} residences for ${config.serverId}.")
+                    val data = localSyncData()
+                    database.syncServerSnapshots(data.changed, data.knownKeys)
+                    refreshCompletionCache(async = false)
+                    if (config.syncLogSuccess || data.changed.isEmpty()) {
+                        plugin.logger.info(
+                            "Synced ${data.changed.size} changed of ${data.knownKeys.size} residences for ${config.serverId}."
+                        )
                     }
                 } catch (t: Throwable) {
-                    warning("Residence sync failed: ${t.message}")
+                    plugin.logger.warning("Residence sync failed: ${t.message}")
                 }
             }
         }
@@ -715,34 +738,182 @@ object BridgePlugin {
         BridgeScheduler.runAsync(block)
     }
 
-    private fun localSnapshots(): List<ResidenceSnapshot> {
-        return ResidenceHook.allSnapshots().filter { snapshot -> snapshot.nameKey !in localDeleteTombstones }
+    private fun runGlobal(delayTicks: Long = 0L, block: () -> Unit) {
+        BridgeScheduler.runGlobal(delayTicks, block)
+    }
+
+    private data class LocalSyncData(
+        val changed: List<ResidenceSnapshot>,
+        val knownKeys: List<String>
+    )
+
+    private fun localSyncData(): LocalSyncData {
+        val all = ResidenceHook.allSnapshots().filter { snapshot -> snapshot.nameKey !in localDeleteTombstones }
+        val changed = mutableListOf<ResidenceSnapshot>()
+        for (snapshot in all) {
+            val fingerprint = fingerprint(snapshot)
+            if (snapshotFingerprints[snapshot.nameKey] != fingerprint) {
+                snapshotFingerprints[snapshot.nameKey] = fingerprint
+                changed += snapshot
+            }
+        }
+        val currentKeys = HashSet<String>(all.size)
+        all.forEach { currentKeys.add(it.nameKey) }
+        snapshotFingerprints.keys.retainAll { it in currentKeys }
+        return LocalSyncData(changed, all.map { it.nameKey })
+    }
+
+    private fun fingerprint(snapshot: ResidenceSnapshot): Long {
+        var result = 1L
+        fun mix(value: Long) {
+            result = result * 31 + value
+        }
+        mix(snapshot.ownerUuid?.mostSignificantBits ?: 0L)
+        mix(snapshot.ownerUuid?.leastSignificantBits ?: 0L)
+        mix(snapshot.ownerName?.hashCode()?.toLong() ?: 0L)
+        mix(snapshot.worldName?.hashCode()?.toLong() ?: 0L)
+        val teleport = snapshot.teleportLocation
+        if (teleport != null) {
+            mix(teleport.worldName.hashCode().toLong())
+            mix(teleport.x.toRawBits())
+            mix(teleport.y.toRawBits())
+            mix(teleport.z.toRawBits())
+            mix(teleport.yaw.toRawBits().toLong())
+            mix(teleport.pitch.toRawBits().toLong())
+        } else {
+            mix(-7046029254386353131L) // 0x9E3779B97F4A7C15 的带符号位模式
+        }
+        return result
     }
 
     private fun markLocalDeleted(name: String) {
         localDeleteTombstones.add(key(name))
+        snapshotFingerprints.remove(key(name))
         removeCompletion(name)
     }
 
-    private fun refreshCompletionCache() {
-        if (!::database.isInitialized) {
+    private fun enqueueWrite(snapshot: ResidenceSnapshot) {
+        pendingSnapshotWrites.add(snapshot)
+        snapshotFingerprints[snapshot.nameKey] = fingerprint(snapshot)
+        scheduleWriteFlush()
+    }
+
+    private fun enqueueDelete(name: String) {
+        val nameKey = key(name)
+        pendingDeletes.add(nameKey)
+        snapshotFingerprints.remove(nameKey)
+        scheduleWriteFlush()
+    }
+
+    private fun scheduleWriteFlush() {
+        synchronized(writeFlushLock) {
+            if (writeFlusherScheduled) {
+                return
+            }
+            writeFlusherScheduled = true
+        }
+        BridgeScheduler.runGlobal(20L) {
+            writeFlusherScheduled = false
+            flushPendingWrites()
+        }
+    }
+
+    private fun flushPendingWrites() {
+        val snapshots = mutableListOf<ResidenceSnapshot>()
+        while (true) {
+            pendingSnapshotWrites.poll()?.let { snapshots += it } ?: break
+        }
+        val deletes = mutableListOf<String>()
+        while (true) {
+            pendingDeletes.poll()?.let { deletes += it } ?: break
+        }
+        if (snapshots.isEmpty() && deletes.isEmpty()) {
             return
         }
         runAsync {
             try {
-                residenceCompletionNames = database.listCompletionResidenceNames()
-                residenceCompletionEntries = database.listCompletionResidences()
-                ownerCompletionNames = database.listCompletionOwnerNames()
+                if (deletes.isNotEmpty()) {
+                    database.bulkDelete(deletes.distinct())
+                }
+                if (snapshots.isNotEmpty()) {
+                    database.bulkUpsertSnapshots(snapshots.distinctBy { it.nameKey })
+                }
             } catch (t: Throwable) {
-                warning("Residence completion refresh failed: ${t.message}")
+                plugin.logger.warning("Batched residence write failed: ${t.message}")
             }
         }
     }
 
+    private fun flushPendingWritesSynchronously() {
+        val snapshots = mutableListOf<ResidenceSnapshot>()
+        while (true) {
+            pendingSnapshotWrites.poll()?.let { snapshots += it } ?: break
+        }
+        val deletes = mutableListOf<String>()
+        while (true) {
+            pendingDeletes.poll()?.let { deletes += it } ?: break
+        }
+        if (snapshots.isEmpty() && deletes.isEmpty()) {
+            return
+        }
+        try {
+            if (deletes.isNotEmpty()) {
+                database.bulkDelete(deletes.distinct())
+            }
+            if (snapshots.isNotEmpty()) {
+                database.bulkUpsertSnapshots(snapshots.distinctBy { it.nameKey })
+            }
+        } catch (t: Throwable) {
+            plugin.logger.warning("Batched residence write failed: ${t.message}")
+        }
+    }
+
+    private fun refreshCompletionCache(async: Boolean = true) {
+        if (!::database.isInitialized) {
+            return
+        }
+        val action = {
+            try {
+                // 轻量版本对比：数据未变化（本服增量同步无写入 + 无跨服写入）时跳过 3 个全表查询
+                val version = database.completionVersion()
+                if (version != lastCompletionVersion) {
+                    lastCompletionVersion = version
+                    residenceCompletionNames = database.listCompletionResidenceNames()
+                    residenceCompletionEntries = database.listCompletionResidences()
+                    ownerCompletionNames = database.listCompletionOwnerNames()
+                    completionNamesByPlayer.clear()
+                    rebuildCompletionOrderedIndexes()
+                }
+            } catch (t: Throwable) {
+                plugin.logger.warning("Residence completion refresh failed: ${t.message}")
+            }
+        }
+        if (async) runAsync(action) else action()
+    }
+
+    private fun rebuildCompletionOrderedIndexes() {
+        synchronized(completionNameOrder) {
+            completionNameOrder.clear()
+            completionNameOrder.addAll(residenceCompletionNames)
+        }
+        synchronized(completionEntryOrder) {
+            completionEntryOrder.clear()
+            completionEntriesByKey.clear()
+            residenceCompletionEntries.forEach { entry ->
+                completionEntryOrder.add(entry.displayName)
+                completionEntriesByKey[entry.nameKey] = entry
+            }
+        }
+        synchronized(completionOwnerOrder) {
+            completionOwnerOrder.clear()
+            completionOwnerOrder.addAll(ownerCompletionNames)
+        }
+    }
+
     private fun addCompletion(residenceName: String, ownerUuid: UUID?, ownerName: String?) {
-        residenceCompletionNames = (residenceCompletionNames + residenceName).distinctBy { key(it) }.sortedWith(String.CASE_INSENSITIVE_ORDER)
+        val nameKey = key(residenceName)
         val entry = ResidenceIndexEntry(
-            nameKey = key(residenceName),
+            nameKey = nameKey,
             displayName = residenceName,
             serverId = config.serverId,
             worldName = null,
@@ -750,21 +921,42 @@ object BridgePlugin {
             ownerName = ownerName,
             updatedAt = System.currentTimeMillis()
         )
-        residenceCompletionEntries = (residenceCompletionEntries.filterNot { it.nameKey == entry.nameKey } + entry)
-            .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.displayName })
-        if (!ownerName.isNullOrBlank()) {
-            ownerCompletionNames = (ownerCompletionNames + ownerName).distinctBy { it.lowercase(Locale.ROOT) }.sortedWith(String.CASE_INSENSITIVE_ORDER)
+        synchronized(completionNameOrder) {
+            completionNameOrder.add(residenceName)
+            residenceCompletionNames = completionNameOrder.toList()
         }
+        synchronized(completionEntryOrder) {
+            completionEntryOrder.add(residenceName)
+            completionEntriesByKey[nameKey] = entry
+            residenceCompletionEntries = completionEntryOrder.mapNotNull { completionEntriesByKey[key(it)] }
+        }
+        if (!ownerName.isNullOrBlank()) {
+            synchronized(completionOwnerOrder) {
+                completionOwnerOrder.add(ownerName)
+                ownerCompletionNames = completionOwnerOrder.toList()
+            }
+        }
+        if (ownerUuid != null) completionNamesByPlayer.remove(ownerUuid)
+        completionNamesByPlayer.entries.removeAll { it.value.any { name -> key(name) == nameKey } }
     }
 
     private fun removeCompletion(residenceName: String) {
         val nameKey = key(residenceName)
-        residenceCompletionNames = residenceCompletionNames.filterNot { key(it) == nameKey }
-        residenceCompletionEntries = residenceCompletionEntries.filterNot { it.nameKey == nameKey }
+        synchronized(completionNameOrder) {
+            completionNameOrder.remove(residenceName)
+            residenceCompletionNames = completionNameOrder.toList()
+        }
+        synchronized(completionEntryOrder) {
+            completionEntryOrder.remove(residenceName)
+            completionEntriesByKey.remove(nameKey)
+            residenceCompletionEntries = completionEntryOrder.mapNotNull { completionEntriesByKey[key(it)] }
+        }
+        completionNamesByPlayer.entries.removeAll { it.value.any { name -> key(name) == nameKey } }
     }
 
     private fun completionNamesFor(player: Player): List<String> {
-        return residenceCompletionEntries.asSequence()
+        completionNamesByPlayer[player.uniqueId]?.let { return it }
+        val computed = residenceCompletionEntries.asSequence()
             .filter { entry ->
                 entry.ownerUuid == player.uniqueId || entry.ownerName.equals(player.name, ignoreCase = true)
             }
@@ -772,6 +964,8 @@ object BridgePlugin {
             .distinctBy { key(it) }
             .sortedWith(String.CASE_INSENSITIVE_ORDER)
             .toList()
+        completionNamesByPlayer[player.uniqueId] = computed
+        return computed
     }
 
     private fun complete(values: List<String>, prefix: String): List<String> {
@@ -862,15 +1056,39 @@ object BridgePlugin {
             plugin,
             false
         )
-        Bukkit.getPluginManager().registerEvent(
-            PlayerCommandPreprocessEvent::class.java,
-            commandOverrideListener,
-            BukkitEventPriority.HIGHEST,
-            executor,
+        commandOverrideRegistered = true
+    }
+
+    private fun registerBridgeEvents() {
+        if (bridgeEventsRegistered) {
+            return
+        }
+        val manager = Bukkit.getPluginManager()
+        manager.registerEvent(
+            PlayerJoinEvent::class.java,
+            bridgeListener,
+            BukkitEventPriority.NORMAL,
+            EventExecutor { _, event -> onJoin(event as PlayerJoinEvent) },
             plugin,
             false
         )
-        commandOverrideRegistered = true
+        manager.registerEvent(
+            PlayerQuitEvent::class.java,
+            bridgeListener,
+            BukkitEventPriority.NORMAL,
+            EventExecutor { _, event -> onQuit(event as PlayerQuitEvent) },
+            plugin,
+            false
+        )
+        manager.registerEvent(
+            TabCompleteEvent::class.java,
+            bridgeListener,
+            BukkitEventPriority.NORMAL,
+            EventExecutor { _, event -> onTabComplete(event as TabCompleteEvent) },
+            plugin,
+            false
+        )
+        bridgeEventsRegistered = true
     }
 
     @Suppress("UNCHECKED_CAST")
@@ -900,6 +1118,43 @@ object BridgePlugin {
         residenceEventsRegistered = true
     }
 
+    private fun ensureTeleportWaitListenerRegistered() {
+        if (teleportWaitListenerRegistered) return
+        if (config.teleportWait.cancelOnMove) {
+            Bukkit.getPluginManager().registerEvent(
+                PlayerMoveEvent::class.java,
+                teleportWaitListener,
+                BukkitEventPriority.MONITOR,
+                EventExecutor { _, event -> handleMove(event as PlayerMoveEvent) },
+                plugin,
+                false
+            )
+        }
+        if (config.teleportWait.cancelOnDamage) {
+            Bukkit.getPluginManager().registerEvent(
+                EntityDamageEvent::class.java,
+                teleportWaitListener,
+                BukkitEventPriority.MONITOR,
+                EventExecutor { _, event -> handleDamage(event as EntityDamageEvent) },
+                plugin,
+                false
+            )
+        }
+        teleportWaitListenerRegistered = true
+    }
+
+    private fun unregisterTeleportWaitListenerIfEmpty() {
+        if (!teleportWaitListenerRegistered) return
+        if (waitingTeleports.isNotEmpty()) return
+        // 延迟注销：短时间内连续传送可复用已注册监听器，避免反复注册/注销
+        BridgeScheduler.runGlobal(100L) {
+            if (waitingTeleports.isEmpty() && teleportWaitListenerRegistered) {
+                HandlerList.unregisterAll(teleportWaitListener)
+                teleportWaitListenerRegistered = false
+            }
+        }
+    }
+
     private fun handleResidenceEvent(event: Event) {
         when (event.javaClass.name.substringAfterLast('.')) {
             "ResidenceCreationEvent" -> {
@@ -909,7 +1164,7 @@ object BridgePlugin {
                     ?: return
                 localDeleteTombstones.remove(snapshot.nameKey)
                 addCompletion(snapshot.name, snapshot.ownerUuid, snapshot.ownerName)
-                runAsync { database.upsertSnapshot(snapshot) }
+                enqueueWrite(snapshot)
                 name?.let { createdName ->
                     runPlayer(snapshot.ownerUuid?.let { Bukkit.getPlayer(it) } ?: return@let, 20L) {
                         confirmCreated(createdName, rollbackIfMissing = false)
@@ -920,7 +1175,7 @@ object BridgePlugin {
                 val residence = event.invokeNoArg("getResidence")
                 val name = ResidenceHook.snapshotFromResidence(residence)?.name ?: residence?.invokeNoArg("getName")?.toString() ?: return
                 markLocalDeleted(name)
-                runAsync { database.delete(name) }
+                enqueueDelete(name)
             }
             "ResidenceRenameEvent" -> {
                 val oldName = event.invokeNoArg("getOldResidenceName")?.toString() ?: return
@@ -939,7 +1194,7 @@ object BridgePlugin {
                 val snapshot = ResidenceHook.snapshotFromResidence(event.invokeNoArg("getResidence")) ?: return
                 localDeleteTombstones.remove(snapshot.nameKey)
                 addCompletion(snapshot.name, snapshot.ownerUuid, snapshot.ownerName)
-                runAsync { database.upsertSnapshot(snapshot) }
+                enqueueWrite(snapshot)
             }
         }
     }
@@ -964,7 +1219,7 @@ object BridgePlugin {
             try {
                 block()
             } catch (t: Throwable) {
-                warning("Player task failed: ${t.message}")
+                plugin.logger.warning("Player task failed: ${t.message}")
             }
         }
     }

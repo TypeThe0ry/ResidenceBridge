@@ -51,6 +51,11 @@ data class PendingAction(
     val expireAt: Long
 )
 
+data class PendingJoinData(
+    val pendingTeleport: PendingTeleport?,
+    val pendingActions: List<PendingAction>
+)
+
 data class ResidenceListPage(
     val entries: List<ResidenceIndexEntry>,
     val total: Int,

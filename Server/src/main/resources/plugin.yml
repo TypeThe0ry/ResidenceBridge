@@ -1,0 +1,26 @@
+name: ResidenceBridge
+version: 1.2.4
+main: org.ewsk.residencebridge.ResidenceBridge
+api-version: 1.20
+authors: [ewsk]
+depend: [Residence]
+softdepend: [PlaceholderAPI]
+commands:
+  rb:
+    description: ResidenceBridge admin command
+    aliases: [residencebridge]
+    permission: residencebridge.command
+    permission-message: "&c你没有权限执行这个操作。"
+permissions:
+  residencebridge.command:
+    description: Access to ResidenceBridge command
+    default: op
+  residencebridge.command.reload:
+    description: Reload ResidenceBridge
+    default: op
+  residencebridge.command.sync:
+    description: Force sync residences
+    default: op
+  residencebridge.command.debug:
+    description: Print residence diagnostics
+    default: op

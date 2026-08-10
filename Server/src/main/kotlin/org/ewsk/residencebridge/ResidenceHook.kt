@@ -1,3 +1,4 @@
+//by TypeThe0ry
 package org.ewsk.residencebridge
 
 import org.bukkit.Bukkit
@@ -9,8 +10,45 @@ import java.io.File
 import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 object ResidenceHook {
+
+    // ===== 反射缓存 =====
+    private val classCache = ConcurrentHashMap<String, Class<*>?>()
+    private val methodCache = ConcurrentHashMap<String, Method?>()
+    private val fieldCache = ConcurrentHashMap<String, Field?>()
+    private val flagCache = ConcurrentHashMap<String, Any?>()
+    private val flagComboCache = ConcurrentHashMap<String, Any?>()
+
+    // ===== sparrow-reflection Proxy =====
+    private val residencePluginProxy by lazy { createProxy(ResidencePluginProxy::class.java) }
+    private val managerProxy by lazy { createProxy(ResidenceManagerProxy::class.java) }
+    private val claimedResidenceProxy by lazy { createProxy(ClaimedResidenceProxy::class.java) }
+    private val flagsProxy by lazy { createProxy(FlagsProxy::class.java) }
+    private val permissionsProxy by lazy { createProxy(FlagPermissionsProxy::class.java) }
+    private val flagComboProxy by lazy { createProxy(FlagComboProxy::class.java) }
+
+    private val residenceInstance: Any? by lazy { resolveResidenceInstance() }
+    private val residenceManager: Any? by lazy {
+        proxySafe { residencePluginProxy?.getResidenceManager(residenceInstance) }
+            ?: residenceInstance?.value("getResidenceManager", "rmanager", "residenceManager")
+    }
+    private val flagsTp by lazy { proxySafe { flagsProxy?.tp() } ?: residenceFlag("tp") }
+    private val flagsMove by lazy { proxySafe { flagsProxy?.move() } ?: residenceFlag("move") }
+    private val flagComboTrueOrNone by lazy { proxySafe { flagComboProxy?.trueOrNone() } ?: residenceFlagCombo("TrueOrNone") }
+
+    // ===== 文件快照缓存（按文件粒度：file -> (mtime, snapshots)） =====
+    @Volatile
+    private var fileSnapshotsCache: List<ResidenceSnapshot> = emptyList()
+    @Volatile
+    private var fileSnapshotsByNameKey: Map<String, ResidenceSnapshot> = emptyMap()
+    @Volatile
+    private var fileSnapshotsLastCheck: Long = 0L
+    private val fileSnapshotEntries = ConcurrentHashMap<String, FileEntry>()
+    private const val FILE_SNAPSHOT_CHECK_INTERVAL_MS = 5000L
+
+    private data class FileEntry(val mtime: Long, val snapshots: List<ResidenceSnapshot>)
 
     fun exists(name: String): Boolean = getResidence(name) != null || fileSnapshot(name) != null
 
@@ -29,26 +67,33 @@ object ResidenceHook {
 
     fun teleportLocation(player: Player, name: String): Location? {
         val residence = getResidence(name) ?: return null
+        proxySafe { claimedResidenceProxy?.getTeleportLocation(residence, player, true) as? Location }?.let { return it }
+        proxySafe { claimedResidenceProxy?.getTeleportLocation(residence, player) as? Location }?.let { return it }
         return (residence.invoke("getTeleportLocation", player, true) as? Location)
             ?: (residence.invoke("getTeleportLocation", player) as? Location)
     }
 
     fun canTeleport(player: Player, name: String): Boolean? {
         val residence = getResidence(name) ?: return null
-        val permissions = residence.invokeNoArg("getPermissions") ?: return null
-        val trueOrNone = residenceFlagCombo("TrueOrNone")
-        val tp = residenceFlag("tp") ?: return permissions.invoke("playerHas", player, "tp", false) as? Boolean
-        val move = residenceFlag("move")
+        val permissions = proxySafe { claimedResidenceProxy?.getPermissions(residence) }
+            ?: residence.invokeNoArg("getPermissions") ?: return null
+        val trueOrNone = flagComboTrueOrNone
+        val tp = flagsTp ?: return permissions.invoke("playerHas", player, "tp", false) as? Boolean
+        val move = flagsMove
         val hasTp = if (trueOrNone != null) {
-            permissions.invoke("playerHas", player, tp, trueOrNone) as? Boolean
+            proxySafe { permissionsProxy?.playerHasCombo(permissions, player, tp, trueOrNone) }
+                ?: (permissions.invoke("playerHas", player, tp, trueOrNone) as? Boolean)
         } else {
-            permissions.invoke("playerHas", player, tp, false) as? Boolean
+            proxySafe { permissionsProxy?.playerHasFlag(permissions, player, tp, false) }
+                ?: (permissions.invoke("playerHas", player, tp, false) as? Boolean)
         } ?: return null
         val hasMove = move?.let {
             if (trueOrNone != null) {
-                permissions.invoke("playerHas", player, it, trueOrNone) as? Boolean
+                proxySafe { permissionsProxy?.playerHasCombo(permissions, player, it, trueOrNone) }
+                    ?: (permissions.invoke("playerHas", player, it, trueOrNone) as? Boolean)
             } else {
-                permissions.invoke("playerHas", player, it, false) as? Boolean
+                proxySafe { permissionsProxy?.playerHasFlag(permissions, player, it, false) }
+                    ?: (permissions.invoke("playerHas", player, it, false) as? Boolean)
             }
         } ?: true
         return hasTp && hasMove
@@ -56,14 +101,11 @@ object ResidenceHook {
 
     fun allSnapshots(): List<ResidenceSnapshot> {
         return try {
-            val names = residenceNames()
-            val snapshots = if (names.isNotEmpty()) {
-                names.mapNotNull { toSnapshot(it) }
-            } else {
-                residenceValues().mapNotNull { residence ->
-                    val residenceName = residence.residenceName() ?: return@mapNotNull null
-                    toSnapshot(residenceName)
-                }
+            // 批量路径：直接从内存 map 取对象，避免 name -> getResidence 二次查找
+            val snapshots = residenceValues().mapNotNull { residence ->
+                val snapshot = snapshotFromResidence(residence) ?: return@mapNotNull null
+                val fileSnapshot = fileSnapshot(snapshot.nameKey)
+                snapshot.copy(teleportLocation = fileSnapshot?.teleportLocation ?: snapshot.teleportLocation)
             }
             snapshots.ifEmpty { fileSnapshots() }
         } catch (_: Throwable) {
@@ -93,30 +135,72 @@ object ResidenceHook {
     }
 
     fun diagnostics(): List<String> {
-        val manager = residenceManager()
+        val manager = residenceManager
         val values = residenceValues()
         val names = residenceNames()
-        val fileSnapshots = fileSnapshots()
+        val fileSnaps = fileSnapshots()
+        val allSnaps = allSnapshots()
         return listOf(
             "Residence plugin: ${Bukkit.getPluginManager().getPlugin("Residence")?.description?.fullName ?: "not found"}",
-            "Residence instance: ${residenceInstance()?.javaClass?.name ?: "null"}",
+            "Residence instance: ${residenceInstance?.javaClass?.name ?: "null"}",
             "Residence manager: ${manager?.javaClass?.name ?: "null"}",
             "Residence names: ${names.size} ${names.joinToString()}",
             "Residence values: ${values.size}",
-            "Residence file snapshots: ${fileSnapshots.size} ${fileSnapshots.joinToString { it.name }}",
-            "Snapshots: ${allSnapshots().size} ${allSnapshots().joinToString { it.name }}"
+            "Residence file snapshots: ${fileSnaps.size} ${fileSnaps.joinToString { it.name }}",
+            "Snapshots: ${allSnaps.size} ${allSnaps.joinToString { it.name }}"
         )
     }
 
     private fun fileSnapshots(): List<ResidenceSnapshot> {
-        val residencePlugin = Bukkit.getPluginManager().getPlugin("Residence") ?: return emptyList()
-        val worldsFolder = File(residencePlugin.dataFolder, "Save/Worlds")
-        if (!worldsFolder.isDirectory) {
+        val now = System.currentTimeMillis()
+        if (now - fileSnapshotsLastCheck < FILE_SNAPSHOT_CHECK_INTERVAL_MS) {
+            return fileSnapshotsCache
+        }
+        fileSnapshotsLastCheck = now
+        val residencePlugin = Bukkit.getPluginManager().getPlugin("Residence") ?: run {
+            clearFileSnapshotsCache()
             return emptyList()
         }
-        return worldsFolder.listFiles { file -> file.isFile && file.extension.equals("yml", ignoreCase = true) }
-            ?.flatMap { file -> snapshotsFromFile(file) }
-            ?: emptyList()
+        val worldsFolder = File(residencePlugin.dataFolder, "Save/Worlds")
+        if (!worldsFolder.isDirectory) {
+            clearFileSnapshotsCache()
+            return emptyList()
+        }
+        val files = worldsFolder.listFiles { file -> file.isFile && file.extension.equals("yml", ignoreCase = true) }
+            ?: emptyArray()
+        var changed = false
+        val knownNames = HashSet<String>(files.size)
+        files.forEach { file ->
+            val fileName = file.name
+            knownNames.add(fileName)
+            val mtime = file.lastModified()
+            val cached = fileSnapshotEntries[fileName]
+            if (cached == null || cached.mtime != mtime) {
+                fileSnapshotEntries[fileName] = FileEntry(mtime, snapshotsFromFile(file))
+                changed = true
+            }
+        }
+        if (fileSnapshotEntries.keys.retainAll(knownNames)) {
+            changed = true
+        }
+        if (changed) {
+            rebuildFileSnapshotIndex()
+        }
+        return fileSnapshotsCache
+    }
+
+    private fun cachedFileSnapshots(): List<ResidenceSnapshot> = fileSnapshotsCache
+
+    private fun rebuildFileSnapshotIndex() {
+        val snapshots = fileSnapshotEntries.values.asSequence().flatMap { it.snapshots.asSequence() }.toList()
+        fileSnapshotsCache = snapshots
+        fileSnapshotsByNameKey = snapshots.associateBy { it.nameKey }
+    }
+
+    private fun clearFileSnapshotsCache() {
+        fileSnapshotEntries.clear()
+        fileSnapshotsCache = emptyList()
+        fileSnapshotsByNameKey = emptyMap()
     }
 
     private fun snapshotsFromFile(file: File): List<ResidenceSnapshot> {
@@ -174,12 +258,13 @@ object ResidenceHook {
     }
 
     private fun fileSnapshot(name: String): ResidenceSnapshot? {
-        val nameKey = key(name)
-        return fileSnapshots().firstOrNull { it.nameKey == nameKey }
+        fileSnapshots()
+        return fileSnapshotsByNameKey[key(name)]
     }
 
     private fun getResidence(name: String): Any? {
-        val manager = residenceManager() ?: return null
+        val manager = residenceManager ?: return null
+        proxySafe { managerProxy?.getByName(manager, name) }?.let { return it }
         manager.invokeString("getByName", name)?.let { return it }
         val map = residencesMap()
         map?.entries?.firstOrNull { (key, _) -> key?.toString()?.equals(name, ignoreCase = true) == true }?.value?.let { return it }
@@ -187,13 +272,12 @@ object ResidenceHook {
     }
 
     private fun claimedResidenceByName(name: String): Any? {
-        val className = "com.bekvon.bukkit.residence.protection.ClaimedResidence"
-        val clazz = runCatching { Class.forName(className) }.getOrNull()
-            ?: Bukkit.getPluginManager().getPlugin("Residence")?.javaClass?.classLoader?.let { loader ->
-                runCatching { loader.loadClass(className) }.getOrNull()
-            }
-            ?: return null
-        return runCatching { clazz.getMethod("getByName", String::class.java).invoke(null, name) }.getOrNull()
+        proxySafe { claimedResidenceProxy?.getByName(name) }?.let { return it }
+        val clazz = loadClass("com.bekvon.bukkit.residence.protection.ClaimedResidence") ?: return null
+        val method = methodCache.getOrPut("${clazz.name}#getByName(java.lang.String)") {
+            runCatching { clazz.getMethod("getByName", String::class.java) }.getOrNull()
+        } ?: return null
+        return runCatching { method.invoke(null, name) }.getOrNull()
     }
 
     private fun residenceValues(): Collection<Any> {
@@ -201,7 +285,7 @@ object ResidenceHook {
         if (map != null) {
             return map.values.filterNotNull()
         }
-        val manager = residenceManager() ?: return emptyList()
+        val manager = residenceManager ?: return emptyList()
         val collection = manager.value("getResidences", "residences") as? Collection<*>
         return collection?.filterNotNull() ?: emptyList()
     }
@@ -211,7 +295,7 @@ object ResidenceHook {
         if (map != null && map.isNotEmpty()) {
             return map.keys.mapNotNull { it?.toString()?.takeIf { name -> name.isNotBlank() } }
         }
-        val manager = residenceManager() ?: return emptyList()
+        val manager = residenceManager ?: return emptyList()
         val value = manager.invokeNoArg("getResidenceList") ?: return emptyList()
         return when (value) {
             is Array<*> -> value.mapNotNull { it?.toString()?.takeIf { name -> name.isNotBlank() } }
@@ -222,59 +306,59 @@ object ResidenceHook {
 
     @Suppress("UNCHECKED_CAST")
     private fun residencesMap(): Map<Any?, Any?>? {
-        val manager = residenceManager() ?: return null
+        val manager = residenceManager ?: return null
+        proxySafe { managerProxy?.getResidences(manager) as? Map<Any?, Any?> }?.let { return it }
         return manager.value("getResidences", "residences") as? Map<Any?, Any?>
     }
 
-    private fun residenceManager(): Any? {
-        val residence = residenceInstance() ?: return null
-        return residence.value("getResidenceManager", "rmanager", "residenceManager")
-    }
-
-    private fun residenceInstance(): Any? {
+    private fun resolveResidenceInstance(): Any? {
+        proxySafe { residencePluginProxy?.getInstance() }?.let { return it }
         val plugin = Bukkit.getPluginManager().getPlugin("Residence")
         if (plugin != null && plugin.javaClass.name == "com.bekvon.bukkit.residence.Residence") {
             return plugin
         }
-        val clazz = residenceClass() ?: return plugin
+        val clazz = loadClass("com.bekvon.bukkit.residence.Residence") ?: return plugin
         return runCatching { clazz.getMethod("getInstance").invoke(null) }.getOrNull() ?: plugin
     }
 
-    private fun residenceClass(): Class<*>? {
-        val className = "com.bekvon.bukkit.residence.Residence"
-        runCatching { Class.forName(className) }.getOrNull()?.let { return it }
-        val plugin = Bukkit.getPluginManager().getPlugin("Residence") ?: return null
-        return runCatching { plugin.javaClass.classLoader.loadClass(className) }.getOrNull()
+    private fun loadClass(className: String): Class<*>? {
+        return classCache.getOrPut(className) {
+            runCatching { Class.forName(className) }.getOrNull()
+                ?: Bukkit.getPluginManager().getPlugin("Residence")?.javaClass?.classLoader?.let { loader ->
+                    runCatching { loader.loadClass(className) }.getOrNull()
+                }
+        }
     }
 
     private fun residenceFlag(name: String): Any? {
-        val className = "com.bekvon.bukkit.residence.containers.Flags"
-        val clazz = runCatching { Class.forName(className) }.getOrNull()
-            ?: Bukkit.getPluginManager().getPlugin("Residence")?.javaClass?.classLoader?.let { loader ->
-                runCatching { loader.loadClass(className) }.getOrNull()
-            }
-            ?: return null
-        return runCatching { clazz.getField(name).get(null) }.getOrNull()
-            ?: runCatching { clazz.getMethod("getFlag", String::class.java).invoke(null, name) }.getOrNull()
+        return flagCache.getOrPut(name) {
+            val clazz = loadClass("com.bekvon.bukkit.residence.containers.Flags") ?: return@getOrPut null
+            runCatching { clazz.getField(name).get(null) }.getOrNull()
+                ?: runCatching { clazz.getMethod("getFlag", String::class.java).invoke(null, name) }.getOrNull()
+        }
     }
 
     private fun residenceFlagCombo(name: String): Any? {
-        val className = "com.bekvon.bukkit.residence.protection.FlagPermissions\$FlagCombo"
-        val clazz = runCatching { Class.forName(className) }.getOrNull()
-            ?: Bukkit.getPluginManager().getPlugin("Residence")?.javaClass?.classLoader?.let { loader ->
-                runCatching { loader.loadClass(className) }.getOrNull()
-            }
-            ?: return null
-        return runCatching { clazz.getField(name).get(null) }.getOrNull()
-            ?: runCatching { clazz.getMethod("valueOf", String::class.java).invoke(null, name) }.getOrNull()
+        return flagComboCache.getOrPut(name) {
+            val clazz = loadClass("com.bekvon.bukkit.residence.protection.FlagPermissions\$FlagCombo") ?: return@getOrPut null
+            runCatching { clazz.getField(name).get(null) }.getOrNull()
+                ?: runCatching { clazz.getMethod("valueOf", String::class.java).invoke(null, name) }.getOrNull()
+        }
     }
 
-    private fun Any.residenceName(): String? = stringValue("getName", "name")
+    private fun Any.residenceName(): String? {
+        proxySafe { claimedResidenceProxy?.getName(this) }?.takeIf { it.isNotBlank() }?.let { return it }
+        return stringValue("getName", "name")
+    }
 
-    private fun Any.ownerName(): String? = stringValue("getOwner", "owner")
+    private fun Any.ownerName(): String? {
+        proxySafe { claimedResidenceProxy?.getOwner(this) }?.takeIf { it.isNotBlank() }?.let { return it }
+        return stringValue("getOwner", "owner")
+    }
 
     private fun Any.ownerUuid(): UUID? {
-        val value = value("getOwnerUUID", "ownerUUID") ?: return null
+        val value = proxySafe { claimedResidenceProxy?.getOwnerUUID(this) }
+            ?: value("getOwnerUUID", "ownerUUID") ?: return null
         return when (value) {
             is UUID -> value
             else -> runCatching { UUID.fromString(value.toString()) }.getOrNull()
@@ -282,7 +366,8 @@ object ResidenceHook {
     }
 
     private fun Any.worldName(): String? {
-        val value = value("getWorldName", "worldName", "getWorld", "world") ?: return null
+        val value = proxySafe { claimedResidenceProxy?.getWorldName(this) }
+            ?: value("getWorldName", "worldName", "getWorld", "world") ?: return null
         return when (value) {
             is World -> value.name
             else -> value.toString().takeIf { it.isNotBlank() }
@@ -345,19 +430,44 @@ object ResidenceHook {
     }
 
     private fun Any.method(name: String, vararg parameterTypes: Class<*>): Method? {
-        var current: Class<*>? = javaClass
+        val key = methodKey(javaClass, name, parameterTypes)
+        return methodCache.getOrPut(key) { resolveMethod(javaClass, name, parameterTypes) }
+    }
+
+    private fun resolveMethod(clazz: Class<*>, name: String, parameterTypes: Array<out Class<*>>): Method? {
+        var current: Class<*>? = clazz
         while (current != null) {
-            runCatching { return current.getDeclaredMethod(name, *parameterTypes) }
+            val method = runCatching { current!!.getDeclaredMethod(name, *parameterTypes) }.getOrNull()
+            if (method != null) return method
             current = current.superclass
         }
-        return runCatching { javaClass.getMethod(name, *parameterTypes) }.getOrNull()
+        return runCatching { clazz.getMethod(name, *parameterTypes) }.getOrNull()
+    }
+
+    private fun methodKey(clazz: Class<*>, name: String, parameterTypes: Array<out Class<*>>): String {
+        if (parameterTypes.isEmpty()) return "${clazz.name}#$name()"
+        val sb = StringBuilder(clazz.name.length + name.length + parameterTypes.size * 30)
+        sb.append(clazz.name).append('#').append(name).append('(')
+        parameterTypes.forEachIndexed { i, type ->
+            if (i > 0) sb.append(',')
+            sb.append(type.name)
+        }
+        sb.append(')')
+        return sb.toString()
     }
 
     private fun Any.field(name: String): Field? {
-        var current: Class<*>? = javaClass
+        val key = "${javaClass.name}#$name"
+        return fieldCache.getOrPut(key) { resolveField(javaClass, name) }
+    }
+
+    private fun resolveField(clazz: Class<*>, name: String): Field? {
+        var current: Class<*>? = clazz
         while (current != null) {
-            runCatching { return current.getDeclaredField(name) }
-            runCatching { return current.getField(name) }
+            val declared = runCatching { current!!.getDeclaredField(name) }.getOrNull()
+            if (declared != null) return declared
+            val public = runCatching { current!!.getField(name) }.getOrNull()
+            if (public != null) return public
             current = current.superclass
         }
         return null
