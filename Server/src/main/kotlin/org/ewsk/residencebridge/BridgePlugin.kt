@@ -107,7 +107,7 @@ object BridgePlugin {
         registerCommandOverride()
         registerResidenceEvents()
         PlaceholderBridge.register(config, database)
-        runAsync { ResidenceHook.refreshFileSnapshots() }
+        ResidenceHook.refreshFileSnapshots()
         scheduleSync()
         refreshCompletionCache()
     }
@@ -545,7 +545,11 @@ object BridgePlugin {
 
     private fun confirmRenamed(oldName: String, newName: String, sameNameKey: Boolean) {
         val newSnapshot = ResidenceHook.toSnapshot(newName)
-        val oldStillExists = if (sameNameKey) false else ResidenceHook.exists(oldName)
+        val oldStillExists = if (sameNameKey) false else if (ResidenceHook.hasLiveManager()) {
+            ResidenceHook.isLoaded(oldName)
+        } else {
+            ResidenceHook.exists(oldName)
+        }
         runAsync {
             if (newSnapshot != null && !oldStillExists) {
                 if (!sameNameKey) {
@@ -664,7 +668,8 @@ object BridgePlugin {
     }
 
     private fun confirmRemoved(name: String): Boolean {
-        if (ResidenceHook.exists(name)) {
+        val exists = if (ResidenceHook.hasLiveManager()) ResidenceHook.isLoaded(name) else ResidenceHook.exists(name)
+        if (exists) {
             return false
         }
         markLocalDeleted(name)

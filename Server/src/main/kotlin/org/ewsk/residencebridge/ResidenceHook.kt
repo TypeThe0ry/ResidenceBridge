@@ -16,15 +16,19 @@ import java.util.UUID
 object ResidenceHook {
 
     private var residenceManagerFailure: String? = null
+    private data class FileSnapshotState(
+        val snapshots: List<ResidenceSnapshot> = emptyList(),
+        val byNameKey: Map<String, ResidenceSnapshot> = emptyMap()
+    )
     @Volatile
-    private var fileSnapshotsCache: List<ResidenceSnapshot> = emptyList()
-    @Volatile
-    private var fileSnapshotsByNameKey: Map<String, ResidenceSnapshot> = emptyMap()
+    private var fileSnapshotState = FileSnapshotState()
     private val fileRefreshLock = Any()
 
-    fun exists(name: String): Boolean = getResidence(name) != null || fileSnapshotsByNameKey.containsKey(key(name))
+    fun exists(name: String): Boolean = getResidence(name) != null || fileSnapshotState.byNameKey.containsKey(key(name))
 
     fun isLoaded(name: String): Boolean = getResidence(name) != null
+
+    fun hasLiveManager(): Boolean = residenceManager() != null
 
     fun getOwnerName(name: String): String? = getResidence(name)?.ownerName()
 
@@ -65,7 +69,7 @@ object ResidenceHook {
     }
 
     fun allSnapshots(): List<ResidenceSnapshot> {
-        val fileSnapshots = fileSnapshotsCache
+        val fileSnapshots = fileSnapshotState.snapshots
         return try {
             val fileSnapshotsByKey = fileSnapshots.associateBy { it.nameKey }
             val roots = residenceValues().ifEmpty {
@@ -79,10 +83,11 @@ object ResidenceHook {
     }
 
     fun toSnapshot(name: String): ResidenceSnapshot? {
-        val residence = getResidence(name) ?: return fileSnapshotsByNameKey[key(name)]
+        val cached = fileSnapshotState.byNameKey
+        val residence = getResidence(name) ?: return cached[key(name)]
         val residenceName = residence.residenceName() ?: name
-        val snapshot = snapshotFromResidence(residence, residenceName) ?: return fileSnapshotsByNameKey[key(name)]
-        val fileSnapshot = fileSnapshotsByNameKey[key(residenceName)]
+        val snapshot = snapshotFromResidence(residence, residenceName) ?: return cached[key(name)]
+        val fileSnapshot = cached[key(residenceName)]
         return snapshot.copy(teleportLocation = fileSnapshot?.teleportLocation ?: snapshot.teleportLocation)
     }
 
@@ -99,16 +104,16 @@ object ResidenceHook {
 
     fun refreshFileSnapshots() {
         synchronized(fileRefreshLock) {
-            val snapshots = runCatching { loadFileSnapshots() }.getOrDefault(emptyList())
-            fileSnapshotsCache = snapshots
-            fileSnapshotsByNameKey = snapshots.associateBy { it.nameKey }
+            val snapshots = runCatching { loadFileSnapshots() }.getOrElse { return }
+            fileSnapshotState = FileSnapshotState(snapshots, snapshots.associateBy { it.nameKey })
         }
     }
 
     fun mergeFileSnapshots(memorySnapshots: List<ResidenceSnapshot>): List<ResidenceSnapshot> {
-        val files = fileSnapshotsCache
+        val state = fileSnapshotState
+        val files = state.snapshots
         if (memorySnapshots.isEmpty()) return files
-        val byNameKey = fileSnapshotsByNameKey
+        val byNameKey = state.byNameKey
         return memorySnapshots.map { snapshot ->
             val location = byNameKey[snapshot.nameKey]?.teleportLocation
             if (location == null) snapshot else snapshot.copy(teleportLocation = location)
@@ -147,7 +152,7 @@ object ResidenceHook {
         val manager = residenceManager()
         val values = residenceValues()
         val names = residenceNames()
-        val fileSnapshots = fileSnapshotsCache
+        val fileSnapshots = fileSnapshotState.snapshots
         return listOf(
             "Residence plugin: ${Bukkit.getPluginManager().getPlugin("Residence")?.description?.fullName ?: "not found"}",
             "Residence instance: ${residenceInstance()?.javaClass?.name ?: "null"}",

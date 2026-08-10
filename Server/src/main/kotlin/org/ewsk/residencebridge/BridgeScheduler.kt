@@ -35,7 +35,7 @@ object BridgeScheduler {
 
     fun init(plugin: Plugin) {
         this.plugin = plugin
-        executor = Executors.newCachedThreadPool { runnable ->
+        executor = Executors.newSingleThreadExecutor { runnable ->
             Thread(runnable, "ResidenceBridge-Worker").apply { isDaemon = true }
         }
     }
