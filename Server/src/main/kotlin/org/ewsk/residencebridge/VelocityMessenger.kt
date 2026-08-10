@@ -30,6 +30,10 @@ internal class VelocityMessenger(private val plugin: Plugin, private val config:
         if (config.fallbackBungeeChannel) plugin.server.messenger.unregisterOutgoingPluginChannel(plugin, "BungeeCord")
     }
 
+    fun cancelPending(playerUuid: UUID) {
+        pending.entries.removeIf { it.value.playerUuid == playerUuid }
+    }
+
     fun checkAvailability(player: Player, targetServer: String, callback: (ServerAvailability) -> Unit) {
         if (!targetServer.isValidProtocolToken()) {
             callback(ServerAvailability.UNAVAILABLE)

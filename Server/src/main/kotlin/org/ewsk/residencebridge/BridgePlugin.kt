@@ -41,7 +41,7 @@ object BridgePlugin {
     private val localDeleteTombstones = ConcurrentHashMap.newKeySet<String>()
     private val waitingTeleports = ConcurrentHashMap<UUID, WaitingTeleport>()
     private val pendingArrivalTeleports = ConcurrentHashMap<UUID, String>()
-    private val inFlightTransfers = ConcurrentHashMap.newKeySet<UUID>()
+    private val inFlightTransfers = ConcurrentHashMap<UUID, UUID>()
     private val residenceEventListener = object : Listener {}
     private val commandOverrideListener = object : Listener {}
     private val teleportWaitListener = object : Listener {}
@@ -282,6 +282,7 @@ object BridgePlugin {
         waitingTeleports.remove(uuid)?.cancelTasks()
         pendingArrivalTeleports.remove(uuid)
         inFlightTransfers.remove(uuid)
+        messenger.cancelPending(uuid)
         pendingRemovals.remove(uuid)
         bypassCreate.remove(uuid)
         bypassRename.remove(uuid)
@@ -452,8 +453,7 @@ object BridgePlugin {
         val location = player.location
         val current = waitingTeleports[player.uniqueId]
         if (current?.entry?.nameKey == entry.nameKey) {
-            player.sendMessage(MessageUtil.apply(config.messages.teleportWait, mapOf("seconds" to seconds, "name" to entry.displayName)))
-            return
+            waitingTeleports.remove(player.uniqueId)?.cancelTasks()
         }
         val waiting = WaitingTeleport(entry, location.world?.name, location.blockX, location.blockY, location.blockZ)
         waitingTeleports.remove(player.uniqueId)?.cancelTasks()
@@ -706,75 +706,92 @@ object BridgePlugin {
         )
     }
 
-    private fun checkServerThenConnect(player: Player, serverId: String, message: String, writePending: () -> Unit) {
+    private fun checkServerThenConnect(
+        player: Player,
+        serverId: String,
+        message: String,
+        writePending: () -> PendingTransferIdentity
+    ) {
         runPlayer(player) {
-            if (!inFlightTransfers.add(player.uniqueId)) return@runPlayer
+            val transferToken = UUID.randomUUID()
+            if (inFlightTransfers.putIfAbsent(player.uniqueId, transferToken) != null) return@runPlayer
             messenger.checkAvailability(player, serverId) { availability ->
                 runPlayer(player) availability@{
+                    if (inFlightTransfers[player.uniqueId] != transferToken) return@availability
                     if (!player.isOnline) {
-                        inFlightTransfers.remove(player.uniqueId)
+                        inFlightTransfers.remove(player.uniqueId, transferToken)
                         return@availability
                     }
                     when (availability) {
-                        ServerAvailability.AVAILABLE -> prepareAndConnect(player, serverId, message, writePending, useFallback = false)
+                        ServerAvailability.AVAILABLE -> prepareAndConnect(player, serverId, message, writePending, transferToken, useFallback = false)
                         ServerAvailability.NOT_FOUND -> {
-                            inFlightTransfers.remove(player.uniqueId)
+                            inFlightTransfers.remove(player.uniqueId, transferToken)
                             player.sendMessage(MessageUtil.apply(config.messages.serverNotFound, mapOf("server" to serverId)))
                         }
                         ServerAvailability.OFFLINE -> {
-                            inFlightTransfers.remove(player.uniqueId)
+                            inFlightTransfers.remove(player.uniqueId, transferToken)
                             player.sendMessage(MessageUtil.apply(config.messages.serverOffline, mapOf("server" to serverId)))
                         }
-                        ServerAvailability.UNAVAILABLE -> prepareAndConnect(player, serverId, message, writePending, useFallback = true)
+                        ServerAvailability.UNAVAILABLE -> prepareAndConnect(player, serverId, message, writePending, transferToken, useFallback = true)
                     }
                 }
             }
         }
     }
 
-    private fun prepareAndConnect(player: Player, serverId: String, message: String, writePending: () -> Unit, useFallback: Boolean) {
+    private fun prepareAndConnect(
+        player: Player,
+        serverId: String,
+        message: String,
+        writePending: () -> PendingTransferIdentity,
+        transferToken: UUID,
+        useFallback: Boolean
+    ) {
         runAsync {
+            var pendingIdentity: PendingTransferIdentity? = null
             try {
-                writePending()
+                pendingIdentity = writePending()
                 runPlayer(player) {
-                    if (!player.isOnline) {
-                        inFlightTransfers.remove(player.uniqueId)
-                        clearPendingTransfer(player.uniqueId, serverId)
+                    if (!player.isOnline || inFlightTransfers[player.uniqueId] != transferToken) {
+                        inFlightTransfers.remove(player.uniqueId, transferToken)
+                        clearPendingTransfer(pendingIdentity)
                         return@runPlayer
                     }
                     val sent = if (useFallback) {
                         messenger.requestFallbackConnect(player, serverId)
                     } else {
-                        messenger.requestConnect(player, serverId) { handleConnectFailure(player, serverId) }
+                        messenger.requestConnect(player, serverId) {
+                            handleConnectFailure(player, pendingIdentity, transferToken)
+                        }
                     }
                     if (sent) {
                         player.sendMessage(MessageUtil.apply(message, mapOf("server" to serverId)))
                         BridgeScheduler.runGlobal(config.serverStatusTimeoutTicks) {
-                            inFlightTransfers.remove(player.uniqueId)
+                            inFlightTransfers.remove(player.uniqueId, transferToken)
                         }
                     } else {
-                        inFlightTransfers.remove(player.uniqueId)
-                        clearPendingTransfer(player.uniqueId, serverId)
+                        inFlightTransfers.remove(player.uniqueId, transferToken)
+                        clearPendingTransfer(pendingIdentity)
                         player.sendMessage(if (useFallback) config.messages.statusUnavailable else config.messages.connectRequestFailed)
                     }
                 }
             } catch (t: Throwable) {
-                inFlightTransfers.remove(player.uniqueId)
+                inFlightTransfers.remove(player.uniqueId, transferToken)
                 plugin.logger.warning("Failed to prepare cross-server request: ${t.message}")
-                clearPendingTransfer(player.uniqueId, serverId)
+                clearPendingTransfer(pendingIdentity)
                 player.sendBridgeMessage(config.messages.connectRequestFailed)
             }
         }
     }
 
-    private fun handleConnectFailure(player: Player, serverId: String) {
-        inFlightTransfers.remove(player.uniqueId)
-        clearPendingTransfer(player.uniqueId, serverId)
+    private fun handleConnectFailure(player: Player, identity: PendingTransferIdentity?, transferToken: UUID) {
+        inFlightTransfers.remove(player.uniqueId, transferToken)
+        clearPendingTransfer(identity)
         runPlayer(player) { if (player.isOnline) player.sendMessage(config.messages.connectRequestFailed) }
     }
 
-    private fun clearPendingTransfer(playerUuid: UUID, serverId: String) {
-        runAsync { database.deletePendingTransfer(playerUuid, serverId) }
+    private fun clearPendingTransfer(identity: PendingTransferIdentity?) {
+        if (identity != null) runAsync { database.deletePendingTransfer(identity) }
     }
 
     private fun scheduleSync() {

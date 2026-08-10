@@ -37,7 +37,8 @@ data class PendingTeleport(
     val playerName: String,
     val residenceName: String,
     val targetServer: String,
-    val expireAt: Long
+    val expireAt: Long,
+    val requestToken: String?
 )
 
 data class PendingAction(
@@ -50,6 +51,11 @@ data class PendingAction(
     val targetServer: String,
     val expireAt: Long
 )
+
+sealed class PendingTransferIdentity {
+    data class Teleport(val playerUuid: UUID, val requestToken: String) : PendingTransferIdentity()
+    data class Action(val id: Long) : PendingTransferIdentity()
+}
 
 data class ResidenceListPage(
     val entries: List<ResidenceIndexEntry>,

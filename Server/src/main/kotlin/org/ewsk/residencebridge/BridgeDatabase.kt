@@ -5,6 +5,7 @@ import com.zaxxer.hikari.HikariConfig
 import com.zaxxer.hikari.HikariDataSource
 import java.sql.Connection
 import java.sql.ResultSet
+import java.sql.Statement
 import java.util.UUID
 import kotlin.math.max
 
@@ -63,10 +64,12 @@ class BridgeDatabase(private val config: BridgeConfig) {
                   player_name VARCHAR(32) NOT NULL,
                   res_name VARCHAR(128) NOT NULL,
                   target_server VARCHAR(64) NOT NULL,
-                  expire_at BIGINT NOT NULL
+                  expire_at BIGINT NOT NULL,
+                  request_token VARCHAR(36)
                 )
                 """.trimIndent()
             )
+            ensureColumn(conn, "residence_bridge_pending_tp", "request_token", "VARCHAR(36)")
             st.executeUpdate(
                 """
                 CREATE TABLE IF NOT EXISTS residence_bridge_pending_action (
@@ -356,6 +359,7 @@ class BridgeDatabase(private val config: BridgeConfig) {
         try {
             val pruneBefore = System.currentTimeMillis() - ACTIVE_PRUNE_GRACE_MILLIS
             snapshots.forEach { upsertSnapshot(conn, it) }
+            purgeExpiredPending(conn, System.currentTimeMillis())
             if (snapshots.isEmpty()) {
                 conn.prepareStatement("DELETE FROM residence_bridge_index WHERE server_id=? AND status='ACTIVE' AND updated_at<?").use { ps ->
                     ps.setString(1, config.serverId)
@@ -380,17 +384,19 @@ class BridgeDatabase(private val config: BridgeConfig) {
         }
     }
 
-    fun writePending(playerUuid: UUID, playerName: String, resName: String, targetServer: String, expireAt: Long) = connection().use { conn ->
+    fun writePending(playerUuid: UUID, playerName: String, resName: String, targetServer: String, expireAt: Long): PendingTransferIdentity.Teleport = connection().use { conn ->
+        val requestToken = UUID.randomUUID().toString()
         conn.prepareStatement(
             """
             INSERT INTO residence_bridge_pending_tp
-            (player_uuid, player_name, res_name, target_server, expire_at)
-            VALUES (?, ?, ?, ?, ?)
+            (player_uuid, player_name, res_name, target_server, expire_at, request_token)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE
               player_name=VALUES(player_name),
               res_name=VALUES(res_name),
               target_server=VALUES(target_server),
-              expire_at=VALUES(expire_at)
+              expire_at=VALUES(expire_at),
+              request_token=VALUES(request_token)
             """.trimIndent()
         ).use { ps ->
             ps.setString(1, playerUuid.toString())
@@ -398,17 +404,20 @@ class BridgeDatabase(private val config: BridgeConfig) {
             ps.setString(3, resName)
             ps.setString(4, targetServer)
             ps.setLong(5, expireAt)
+            ps.setString(6, requestToken)
             ps.executeUpdate()
         }
+        PendingTransferIdentity.Teleport(playerUuid, requestToken)
     }
 
-    fun writePendingAction(playerUuid: UUID, playerName: String, actionType: String, commandText: String, resName: String, targetServer: String, expireAt: Long) = connection().use { conn ->
+    fun writePendingAction(playerUuid: UUID, playerName: String, actionType: String, commandText: String, resName: String, targetServer: String, expireAt: Long): PendingTransferIdentity.Action = connection().use { conn ->
         conn.prepareStatement(
             """
             INSERT INTO residence_bridge_pending_action
             (player_uuid, player_name, action_type, command_text, res_name, target_server, expire_at, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """.trimIndent()
+            """.trimIndent(),
+            Statement.RETURN_GENERATED_KEYS
         ).use { ps ->
             ps.setString(1, playerUuid.toString())
             ps.setString(2, playerName)
@@ -419,19 +428,28 @@ class BridgeDatabase(private val config: BridgeConfig) {
             ps.setLong(7, expireAt)
             ps.setLong(8, System.currentTimeMillis())
             ps.executeUpdate()
+            ps.generatedKeys.use { keys ->
+                check(keys.next()) { "Pending action insert did not return an id" }
+                PendingTransferIdentity.Action(keys.getLong(1))
+            }
         }
     }
 
-    fun deletePendingTransfer(playerUuid: UUID, targetServer: String) = connection().use { conn ->
-        conn.prepareStatement("DELETE FROM residence_bridge_pending_tp WHERE player_uuid=? AND target_server=?").use { ps ->
-            ps.setString(1, playerUuid.toString())
-            ps.setString(2, targetServer)
-            ps.executeUpdate()
-        }
-        conn.prepareStatement("DELETE FROM residence_bridge_pending_action WHERE player_uuid=? AND target_server=?").use { ps ->
-            ps.setString(1, playerUuid.toString())
-            ps.setString(2, targetServer)
-            ps.executeUpdate()
+    fun deletePendingTransfer(identity: PendingTransferIdentity) = connection().use { conn ->
+        when (identity) {
+            is PendingTransferIdentity.Teleport -> conn.prepareStatement(
+                "DELETE FROM residence_bridge_pending_tp WHERE player_uuid=? AND request_token=?"
+            ).use { ps ->
+                ps.setString(1, identity.playerUuid.toString())
+                ps.setString(2, identity.requestToken)
+                ps.executeUpdate()
+            }
+            is PendingTransferIdentity.Action -> conn.prepareStatement(
+                "DELETE FROM residence_bridge_pending_action WHERE id=?"
+            ).use { ps ->
+                ps.setLong(1, identity.id)
+                ps.executeUpdate()
+            }
         }
     }
 
@@ -439,7 +457,7 @@ class BridgeDatabase(private val config: BridgeConfig) {
         conn.autoCommit = false
         try {
             val pending = conn.prepareStatement(
-                "SELECT * FROM residence_bridge_pending_tp WHERE player_uuid=? AND target_server=?"
+                "SELECT * FROM residence_bridge_pending_tp WHERE player_uuid=? AND target_server=? FOR UPDATE"
             ).use { ps ->
                 ps.setString(1, playerUuid.toString())
                 ps.setString(2, config.serverId)
@@ -470,7 +488,7 @@ class BridgeDatabase(private val config: BridgeConfig) {
                 """
                 SELECT * FROM residence_bridge_pending_action
                 WHERE player_uuid=? AND target_server=? AND expire_at>=?
-                ORDER BY id ASC
+                ORDER BY id ASC FOR UPDATE
                 """.trimIndent()
             ).use { ps ->
                 ps.setString(1, playerUuid.toString())
@@ -508,6 +526,21 @@ class BridgeDatabase(private val config: BridgeConfig) {
 
     fun close() {
         dataSource.close()
+    }
+
+    fun purgeExpiredPending(now: Long = System.currentTimeMillis()) = connection().use { conn ->
+        purgeExpiredPending(conn, now)
+    }
+
+    private fun purgeExpiredPending(conn: Connection, now: Long) {
+        conn.prepareStatement("DELETE FROM residence_bridge_pending_tp WHERE expire_at<?").use { ps ->
+            ps.setLong(1, now)
+            ps.executeUpdate()
+        }
+        conn.prepareStatement("DELETE FROM residence_bridge_pending_action WHERE expire_at<?").use { ps ->
+            ps.setLong(1, now)
+            ps.executeUpdate()
+        }
     }
 
     private fun upsertSnapshot(conn: Connection, snapshot: ResidenceSnapshot) {
@@ -637,7 +670,8 @@ class BridgeDatabase(private val config: BridgeConfig) {
             playerName = getString("player_name"),
             residenceName = getString("res_name"),
             targetServer = getString("target_server"),
-            expireAt = getLong("expire_at")
+            expireAt = getLong("expire_at"),
+            requestToken = getString("request_token")
         )
     }
 
