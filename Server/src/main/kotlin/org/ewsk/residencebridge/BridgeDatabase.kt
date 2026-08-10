@@ -123,8 +123,6 @@ class BridgeDatabase(private val config: BridgeConfig) {
         }
     }
 
-    fun reserveName(name: String): Boolean = reserveName(name, config.serverId, null, null)
-
     fun reserveName(name: String, serverId: String, ownerUuid: UUID?, ownerName: String?): Boolean = connection().use { conn ->
         conn.prepareStatement(
             """
@@ -199,10 +197,6 @@ class BridgeDatabase(private val config: BridgeConfig) {
         }
     }
 
-    fun upsertSnapshot(snapshot: ResidenceSnapshot) = connection().use { conn ->
-        upsertSnapshot(conn, snapshot)
-    }
-
     fun bulkUpsertSnapshots(snapshots: List<ResidenceSnapshot>) = connection().use { conn ->
         if (snapshots.isEmpty()) {
             return@use
@@ -253,18 +247,6 @@ class BridgeDatabase(private val config: BridgeConfig) {
             ps.setString(2, config.serverId)
             ps.executeUpdate()
         }
-    }
-
-    fun delete(name: String) = connection().use { conn ->
-        conn.prepareStatement("DELETE FROM residence_bridge_index WHERE name_key=? AND server_id=?").use { ps ->
-            ps.setString(1, key(name))
-            ps.setString(2, config.serverId)
-            ps.executeUpdate()
-        }
-    }
-
-    fun countResidencesByOwner(ownerUuid: UUID, ownerName: String): Int = connection().use { conn ->
-        countByOwner(conn, ownerUuid, ownerName, includeReserved = false)
     }
 
     fun listResidencesByOwner(ownerUuid: UUID, ownerName: String, page: Int, pageSize: Int): ResidenceListPage = connection().use { conn ->
@@ -331,30 +313,15 @@ class BridgeDatabase(private val config: BridgeConfig) {
         }
     }
 
-    fun listCompletionResidenceNames(limit: Int = 500): List<String> = connection().use { conn ->
-        conn.prepareStatement(
-            """
-            SELECT display_name FROM residence_bridge_index
-            WHERE status='ACTIVE'
-            ORDER BY display_name ASC
-            LIMIT ?
-            """.trimIndent()
-        ).use { ps ->
-            ps.setInt(1, limit)
-            ps.executeQuery().use { rs ->
-                val result = mutableListOf<String>()
-                while (rs.next()) {
-                    result += rs.getString("display_name")
-                }
-                result
-            }
-        }
-    }
-
+    /**
+     * 补全缓存的唯一数据来源。只选补全真正需要的列（避免把 tp_* 坐标一起拉回来），
+     * owner 名单由调用方从同一批结果里推导，不再额外发 DISTINCT 查询。
+     */
     fun listCompletionResidences(limit: Int = 500): List<ResidenceIndexEntry> = connection().use { conn ->
         conn.prepareStatement(
             """
-            SELECT * FROM residence_bridge_index
+            SELECT name_key, display_name, server_id, world, owner_uuid, owner_name, updated_at
+            FROM residence_bridge_index
             WHERE status='ACTIVE'
             ORDER BY display_name ASC
             LIMIT ?
@@ -364,27 +331,15 @@ class BridgeDatabase(private val config: BridgeConfig) {
             ps.executeQuery().use { rs ->
                 val result = mutableListOf<ResidenceIndexEntry>()
                 while (rs.next()) {
-                    result += rs.toIndexEntry()
-                }
-                result
-            }
-        }
-    }
-
-    fun listCompletionOwnerNames(limit: Int = 500): List<String> = connection().use { conn ->
-        conn.prepareStatement(
-            """
-            SELECT DISTINCT owner_name FROM residence_bridge_index
-            WHERE status='ACTIVE' AND owner_name IS NOT NULL AND owner_name<>''
-            ORDER BY owner_name ASC
-            LIMIT ?
-            """.trimIndent()
-        ).use { ps ->
-            ps.setInt(1, limit)
-            ps.executeQuery().use { rs ->
-                val result = mutableListOf<String>()
-                while (rs.next()) {
-                    result += rs.getString("owner_name")
+                    result += ResidenceIndexEntry(
+                        nameKey = rs.getString("name_key"),
+                        displayName = rs.getString("display_name"),
+                        serverId = rs.getString("server_id"),
+                        worldName = rs.getString("world"),
+                        ownerUuid = rs.getString("owner_uuid")?.let { runCatching { UUID.fromString(it) }.getOrNull() },
+                        ownerName = rs.getString("owner_name"),
+                        updatedAt = rs.getLong("updated_at")
+                    )
                 }
                 result
             }
@@ -393,12 +348,20 @@ class BridgeDatabase(private val config: BridgeConfig) {
 
     /**
      * 轻量版本指纹（行数 + 最大更新时间），用于判断 completion 缓存是否需要刷新。
+     *
+     * 注意：不能用 `count shl 32 or maxUpdatedAt`。updated_at 是毫秒时间戳，已占约 41 位，
+     * 与左移后的 count 位区间重叠，会出现「行数变了但版本号不变」的漏刷新。
+     * 这里改用混合哈希，两个分量都参与且互不覆盖。
      */
     fun completionVersion(): Long = connection().use { conn ->
         conn.prepareStatement("SELECT COUNT(*), COALESCE(MAX(updated_at), 0) FROM residence_bridge_index").use { ps ->
             ps.executeQuery().use { rs ->
                 if (rs.next()) {
-                    (rs.getLong(1) shl 32) or rs.getLong(2)
+                    val count = rs.getLong(1)
+                    val maxUpdatedAt = rs.getLong(2)
+                    var hash = count * 0x9E3779B97F4A7C15uL.toLong()
+                    hash = hash xor (maxUpdatedAt * 0xC2B2AE3D27D4EB4FuL.toLong())
+                    hash xor (hash ushr 29)
                 } else {
                     0L
                 }
@@ -532,34 +495,6 @@ class BridgeDatabase(private val config: BridgeConfig) {
             ps.setLong(7, expireAt)
             ps.setLong(8, System.currentTimeMillis())
             ps.executeUpdate()
-        }
-    }
-
-    fun consumePending(playerUuid: UUID): PendingTeleport? = connection().use { conn ->
-        conn.autoCommit = false
-        try {
-            val pending = consumePendingTeleport(conn, playerUuid)
-            conn.commit()
-            pending
-        } catch (t: Throwable) {
-            conn.rollback()
-            throw t
-        } finally {
-            conn.autoCommit = true
-        }
-    }
-
-    fun consumePendingActions(playerUuid: UUID): List<PendingAction> = connection().use { conn ->
-        conn.autoCommit = false
-        try {
-            val actions = consumePendingActions(conn, playerUuid)
-            conn.commit()
-            actions
-        } catch (t: Throwable) {
-            conn.rollback()
-            throw t
-        } finally {
-            conn.autoCommit = true
         }
     }
 
@@ -723,7 +658,8 @@ class BridgeDatabase(private val config: BridgeConfig) {
             displayName = getString("display_name"),
             serverId = getString("server_id"),
             worldName = getString("world"),
-            ownerUuid = getString("owner_uuid")?.let { UUID.fromString(it) },
+            // 脏数据不应让整条查询失败（历史数据可能存的是玩家名而非 UUID）。
+            ownerUuid = getString("owner_uuid")?.let { runCatching { UUID.fromString(it) }.getOrNull() },
             ownerName = getString("owner_name"),
             updatedAt = getLong("updated_at"),
             teleportLocation = readBridgeLocation()
