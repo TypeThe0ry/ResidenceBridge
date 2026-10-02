@@ -5,7 +5,7 @@
 > Cross-server Residence bridge for sharing [Residence](https://www.spigotmc.org/resources/residence.11480/) data, teleport requests, and global limits across a Velocity / BungeeCord network.
 
 [![Java](https://img.shields.io/badge/Server-Java%208%2B-orange.svg)](https://adoptium.net)
-[![Minecraft](https://img.shields.io/badge/Minecraft-1.16%2B-brightgreen.svg)](https://papermc.io)
+[![Minecraft](https://img.shields.io/badge/Minecraft-1.16--26.3-brightgreen.svg)](https://papermc.io)
 
 
 ## Features
@@ -26,7 +26,7 @@
 
 | Component | Requirement |
 |-----------|-------------|
-| Sub-server | Paper / Spigot / Folia 1.16+ |
+| Sub-server | Paper / Spigot / Folia 1.16 - 26.3 |
 | Residence | Installed on every sub-server |
 | Velocity | Velocity 3.x |
 | Database | MySQL 5.7+ or MariaDB 10.4+ |

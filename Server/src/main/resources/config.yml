@@ -45,6 +45,7 @@ teleport:
     cancel-on-move: true
     cancel-on-damage: true
     # 每秒倒计时提示音；填空字符串可关闭
+    # 支持旧版枚举名（如 BLOCK_NOTE_BLOCK_PLING）或命名空间键（如 minecraft:block.note_block.pling）
     countdown-sound: "BLOCK_NOTE_BLOCK_PLING"
     countdown-sound-volume: 1.0
     countdown-sound-pitch: 1.2

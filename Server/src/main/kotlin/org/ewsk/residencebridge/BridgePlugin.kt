@@ -1,7 +1,7 @@
 package org.ewsk.residencebridge
 
 import org.bukkit.Bukkit
-import org.bukkit.Sound
+import org.bukkit.Keyed
 import org.bukkit.command.Command
 import org.bukkit.command.CommandSender
 import org.bukkit.entity.Player
@@ -36,6 +36,7 @@ object BridgePlugin {
     private var syncTask: BridgeTask? = null
     @Volatile
     private var started = false
+    private val soundKeys = ConcurrentHashMap<String, String>()
     private val bypassCreate = Collections.synchronizedSet(mutableSetOf<UUID>())
     private val bypassRename = Collections.synchronizedSet(mutableSetOf<UUID>())
     private val bypassCommand = Collections.synchronizedSet(mutableSetOf<UUID>())
@@ -908,8 +909,35 @@ object BridgePlugin {
         if (soundName.isEmpty()) {
             return
         }
-        val sound = runCatching { Sound.valueOf(soundName.uppercase(Locale.ROOT)) }.getOrNull() ?: return
-        player.playSound(player.location, sound, config.teleportWait.countdownSoundVolume, config.teleportWait.countdownSoundPitch)
+        val soundKey = soundKeys.getOrPut(soundName) { resolveSoundKey(soundName) ?: "" }
+        if (soundKey.isEmpty()) {
+            return
+        }
+        player.playSound(player.location, soundKey, config.teleportWait.countdownSoundVolume, config.teleportWait.countdownSoundPitch)
+    }
+
+    // Sound is an enum before 1.21.3 and a registry-backed interface afterwards (26.x included),
+    // so resolve the configured name to a namespaced key and play it through the String overload.
+    private fun resolveSoundKey(soundName: String): String? {
+        if (soundName.contains('.') || soundName.contains(':')) {
+            return soundName.lowercase(Locale.ROOT)
+        }
+        val enumName = soundName.uppercase(Locale.ROOT)
+        runCatching {
+            val registry = Class.forName("org.bukkit.Registry").getField("SOUNDS").get(null) as Iterable<*>
+            registry.forEach { sound ->
+                val key = (sound as? Keyed)?.key ?: return@forEach
+                if (key.key.replace('.', '_').replace('/', '_').uppercase(Locale.ROOT) == enumName) {
+                    return key.toString()
+                }
+            }
+        }
+        val legacy = runCatching {
+            Class.forName("org.bukkit.Sound").getMethod("valueOf", String::class.java).invoke(null, enumName)
+        }.getOrNull()
+        (legacy as? Keyed)?.let { return it.key.toString() }
+        warning("Unknown countdown sound: $soundName")
+        return null
     }
 
     private fun registerCommandMapOverride() {

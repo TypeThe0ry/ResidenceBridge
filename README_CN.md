@@ -6,7 +6,7 @@ English version: [README.md](README.md)
 
 [![Server Java](https://img.shields.io/badge/Server-Java%208%2B-orange.svg)](https://adoptium.net)
 [![Velocity Java](https://img.shields.io/badge/Velocity-Java%2017%2B-orange.svg)](https://adoptium.net)
-[![Minecraft](https://img.shields.io/badge/Minecraft-1.16%2B-brightgreen.svg)](https://papermc.io)
+[![Minecraft](https://img.shields.io/badge/Minecraft-1.16--26.3-brightgreen.svg)](https://papermc.io)
 
 
 ## 功能
@@ -27,7 +27,7 @@ English version: [README.md](README.md)
 
 | 组件 | 要求 |
 |------|------|
-| 子服 | Paper / Spigot / Folia 1.16+ |
+| 子服 | Paper / Spigot / Folia 1.16 - 26.3 |
 | Residence | 各子服安装，建议使用稳定新版 |
 | Velocity | Velocity 3.x |
 | 数据库 | MySQL 5.7+ 或 MariaDB 10.4+ |
