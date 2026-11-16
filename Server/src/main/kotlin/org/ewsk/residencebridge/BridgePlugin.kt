@@ -42,6 +42,8 @@ object BridgePlugin {
     private val bypassCommand = Collections.synchronizedSet(mutableSetOf<UUID>())
     private val pendingRemovals = ConcurrentHashMap<UUID, MutableSet<String>>()
     private val localDeleteTombstones = ConcurrentHashMap.newKeySet<String>()
+    private val reportedConflicts = ConcurrentHashMap.newKeySet<String>()
+    private val emptySyncWarned = java.util.concurrent.atomic.AtomicBoolean(false)
     private val waitingTeleports = ConcurrentHashMap<UUID, WaitingTeleport>()
     private val pendingArrivalTeleports = ConcurrentHashMap<UUID, String>()
     private val inFlightTransfers = ConcurrentHashMap<UUID, UUID>()
@@ -79,9 +81,9 @@ object BridgePlugin {
         start()
     }
 
-    fun syncNow(callback: (Int, Throwable?) -> Unit) {
+    fun syncNow(callback: (SyncOutcome?, Throwable?) -> Unit) {
         if (!started || !::database.isInitialized) {
-            callback(0, IllegalStateException("ResidenceBridge database is not initialized."))
+            callback(null, IllegalStateException("ResidenceBridge database is not initialized."))
             return
         }
         BridgeScheduler.runGlobal {
@@ -90,20 +92,34 @@ object BridgePlugin {
                 try {
                     ResidenceHook.refreshFileSnapshots()
                     val snapshots = localSnapshots(ResidenceHook.mergeFileSnapshots(memorySnapshots))
-                    database.syncServerSnapshots(snapshots)
+                    val outcome = database.syncServerSnapshots(snapshots)
+                    reportSyncOutcome(outcome)
                     refreshCompletionCache()
-                    BridgeScheduler.runGlobal { callback(snapshots.size, null) }
+                    BridgeScheduler.runGlobal { callback(outcome, null) }
                 } catch (t: Throwable) {
-                    BridgeScheduler.runGlobal { callback(0, t) }
+                    BridgeScheduler.runGlobal { callback(null, t) }
                 }
             }
         }
     }
 
     private fun start() {
+        try {
+            doStart()
+        } catch (t: Throwable) {
+            // Do not leave a half-initialised plugin behind (open pool, worker thread, registered channels).
+            runCatching { stop() }
+            throw t
+        }
+    }
+
+    private fun doStart() {
         started = false
         BridgeScheduler.init(plugin)
         config = BridgeConfig.load(plugin.config)
+        if (config.serverId == BridgeConfig.DEFAULT_SERVER_ID) {
+            warning("server-id is still the default '${BridgeConfig.DEFAULT_SERVER_ID}'. Every backend server MUST use a different server-id, otherwise residences of different servers are treated as local.")
+        }
         database = BridgeDatabase(config)
         database.initTables()
         messenger = VelocityMessenger(plugin, config)
@@ -126,6 +142,7 @@ object BridgePlugin {
         waitingTeleports.clear()
         pendingRemovals.clear()
         localDeleteTombstones.clear()
+        reportedConflicts.clear()
         residenceCompletionNames = emptyList()
         residenceCompletionEntries = emptyList()
         ownerCompletionNames = emptyList()
@@ -378,8 +395,7 @@ object BridgePlugin {
                     )
                 )
                 CreateReservationStatus.RESERVED -> runPlayer(player) {
-                    bypassCreate.add(player.uniqueId)
-                    player.performCommand("res create $residenceName")
+                    performBypassed(player, bypassCreate, "res create $residenceName")
                     confirmCreated(residenceName, rollbackIfMissing = true)
                     scheduleCreateChecks(player, residenceName)
                 }
@@ -389,9 +405,7 @@ object BridgePlugin {
 
     private fun handleAdminCommand(event: PlayerCommandPreprocessEvent, parsed: ParsedResidenceCommand) {
         when (parsed.subCommand) {
-            "create" -> parsed.args.getOrNull(0)?.let {
-                scheduleCreateChecks(event.player, it)
-            }
+            "create" -> parsed.args.getOrNull(0)?.let { name -> handleAdminCreate(event, parsed, name) }
             "remove", "delete" -> parsed.args.getOrNull(0)?.let {
                 trackRemoval(event.player, it)
                 scheduleRemovalChecks(event.player, listOf(it))
@@ -399,7 +413,47 @@ object BridgePlugin {
             "rename" -> {
                 val oldName = parsed.args.getOrNull(0) ?: return
                 val newName = parsed.args.getOrNull(1) ?: return
-                scheduleRenameChecks(event.player, oldName, newName, key(oldName) == key(newName))
+                handleAdminRename(event, parsed, oldName, newName)
+            }
+        }
+    }
+
+    /** /resadmin create must obey the same global name uniqueness as /res create (but has no per-player limit). */
+    private fun handleAdminCreate(event: PlayerCommandPreprocessEvent, parsed: ParsedResidenceCommand, name: String) {
+        val player = event.player
+        event.isCancelled = true
+        runAsync {
+            if (!database.reserveName(name, config.serverId, player.uniqueId, player.name)) {
+                player.sendBridgeMessage(MessageUtil.apply(config.messages.duplicate, mapOf("name" to name)))
+                return@runAsync
+            }
+            runPlayer(player) {
+                performBypassed(player, bypassCommand, parsed.rawCommand)
+                confirmCreated(name, rollbackIfMissing = true)
+                scheduleCreateChecks(player, name)
+            }
+        }
+    }
+
+    private fun handleAdminRename(event: PlayerCommandPreprocessEvent, parsed: ParsedResidenceCommand, oldName: String, newName: String) {
+        val player = event.player
+        val sameNameKey = key(oldName) == key(newName)
+        if (sameNameKey || !ResidenceHook.exists(oldName)) {
+            // Case-only rename, or a residence that lives on another server / does not exist: nothing to reserve locally.
+            scheduleRenameChecks(player, oldName, newName, sameNameKey)
+            return
+        }
+        event.isCancelled = true
+        val ownerUuid = ResidenceHook.getOwnerUuid(oldName)
+        val ownerName = ResidenceHook.getOwnerName(oldName)
+        runAsync {
+            if (!database.reserveName(newName, config.serverId, ownerUuid, ownerName)) {
+                player.sendBridgeMessage(MessageUtil.apply(config.messages.duplicate, mapOf("name" to newName)))
+                return@runAsync
+            }
+            runPlayer(player) {
+                performBypassed(player, bypassCommand, parsed.rawCommand)
+                scheduleRenameChecks(player, oldName, newName, false)
             }
         }
     }
@@ -424,7 +478,7 @@ object BridgePlugin {
             if (snapshot != null) {
                 localDeleteTombstones.remove(snapshot.nameKey)
                 addCompletion(snapshot.name, snapshot.ownerUuid, snapshot.ownerName)
-                database.upsertSnapshot(snapshot)
+                upsertAndReport(snapshot)
             } else if (rollbackIfMissing) {
                 removeCompletion(name)
                 database.deleteReservationIfLocal(name)
@@ -449,7 +503,7 @@ object BridgePlugin {
                 teleportLocation = localSnapshot.teleportLocation
             )
             startTeleport(player, entry.forTargetResidence(residenceName))
-            runAsync { database.upsertSnapshot(localSnapshot) }
+            runAsync { upsertAndReport(localSnapshot) }
             return
         }
         runAsync {
@@ -532,8 +586,7 @@ object BridgePlugin {
                     }
                 }
                 runPlayer(player) {
-                    bypassRename.add(player.uniqueId)
-                    player.performCommand(parsed.rawCommand)
+                    performBypassed(player, bypassRename, parsed.rawCommand)
                     scheduleRenameChecks(player, oldName, newName, sameNameKey)
                 }
             }
@@ -574,7 +627,7 @@ object BridgePlugin {
                     markLocalDeleted(oldName)
                 }
                 localDeleteTombstones.remove(newSnapshot.nameKey)
-                database.replaceRenamed(oldName, newSnapshot)
+                database.replaceRenamed(oldName, newSnapshot)?.let { reportConflict(it) }
             } else if (!sameNameKey) {
                 database.deleteReservationIfLocal(newName)
             }
@@ -612,8 +665,7 @@ object BridgePlugin {
             }
             if (entry.serverId.equals(config.serverId, ignoreCase = true)) {
                 runPlayer(player) {
-                    bypassCommand.add(player.uniqueId)
-                    player.performCommand(parsed.rawCommand)
+                    performBypassed(player, bypassCommand, parsed.rawCommand)
                     runPlayer(player, 40L) { confirmActionSnapshot(parsed) }
                 }
                 return@runAsync
@@ -639,8 +691,7 @@ object BridgePlugin {
         if (parsed.admin || parsed.subCommand != action.actionType || parsed.subCommand !in config.remoteActionCommands) return
         if (key(target) != key(action.residenceName) || !action.targetServer.equals(config.serverId, ignoreCase = true)) return
         player.sendMessage(config.messages.remoteActionQueued)
-        bypassCommand.add(player.uniqueId)
-        player.performCommand(parsed.rawCommand)
+        performBypassed(player, bypassCommand, parsed.rawCommand)
         runPlayer(player, 40L) { confirmActionSnapshot(parsed) }
     }
 
@@ -666,7 +717,7 @@ object BridgePlugin {
         val snapshot = ResidenceHook.toSnapshot(name) ?: return
         runAsync {
             localDeleteTombstones.remove(snapshot.nameKey)
-            database.upsertSnapshot(snapshot)
+            upsertAndReport(snapshot)
         }
     }
 
@@ -698,9 +749,23 @@ object BridgePlugin {
         return true
     }
 
+    /**
+     * Runs a command through the native Residence handler while skipping our own override.
+     * performCommand() is synchronous and never fires PlayerCommandPreprocessEvent, so the one-shot flag is only
+     * consumed when the command-map wrapper dispatches it. Always clear it afterwards so a leaked flag can never
+     * let the player's next real command skip the duplicate / limit checks.
+     */
+    private fun performBypassed(player: Player, flags: MutableSet<UUID>, command: String): Boolean {
+        flags.add(player.uniqueId)
+        return try {
+            player.performCommand(command)
+        } finally {
+            flags.remove(player.uniqueId)
+        }
+    }
+
     private fun runNativeResidenceTeleport(player: Player, residenceName: String) {
-        bypassCommand.add(player.uniqueId)
-        player.performCommand("res tp $residenceName")
+        performBypassed(player, bypassCommand, "res tp $residenceName")
     }
 
     private fun scheduleNativeArrivalTeleport(player: Player, residenceName: String) {
@@ -822,16 +887,44 @@ object BridgePlugin {
                 try {
                     ResidenceHook.refreshFileSnapshots()
                     val snapshots = localSnapshots(ResidenceHook.mergeFileSnapshots(memorySnapshots))
-                    database.syncServerSnapshots(snapshots)
+                    val outcome = database.syncServerSnapshots(snapshots)
+                    reportSyncOutcome(outcome)
                     refreshCompletionCache()
                     if (config.syncLogSuccess) {
-                        info("Synced ${snapshots.size} residences for ${config.serverId}.")
+                        info("Synced ${outcome.synced} residences for ${config.serverId}.")
                     }
                 } catch (t: Throwable) {
                     warning("Residence sync failed: ${t.message}")
                 }
             }
         }
+    }
+
+    private fun reportSyncOutcome(outcome: SyncOutcome) {
+        if (outcome.skipped > 0) {
+            warning("Skipped ${outcome.skipped} residences whose name is longer than 128 characters.")
+        }
+        if (outcome.pruneSkipped) {
+            if (emptySyncWarned.compareAndSet(false, true)) {
+                warning("Residence sync found no readable residences on '${config.serverId}', so existing index rows were kept (nothing pruned). Check that Residence loaded correctly.")
+            }
+        } else {
+            emptySyncWarned.set(false)
+        }
+        val current = outcome.conflicts.map { it.nameKey }.toSet()
+        reportedConflicts.retainAll(current)
+        outcome.conflicts.forEach { reportConflict(it) }
+    }
+
+    /** Warns once per duplicated name until the conflict disappears. */
+    private fun reportConflict(conflict: IndexConflict) {
+        if (reportedConflicts.add(conflict.nameKey)) {
+            warning("Duplicate residence name '${conflict.displayName}': this server ('${config.serverId}') has it, but the global index already assigns it to server '${conflict.otherServerId}' (${conflict.status}). Rename one of them; this server's copy is NOT indexed.")
+        }
+    }
+
+    private fun upsertAndReport(snapshot: ResidenceSnapshot) {
+        database.upsertSnapshot(snapshot)?.let { reportConflict(it) }
     }
 
     private fun runAsync(block: () -> Unit) {
@@ -1091,7 +1184,7 @@ object BridgePlugin {
                     ?: return
                 localDeleteTombstones.remove(snapshot.nameKey)
                 addCompletion(snapshot.name, snapshot.ownerUuid, snapshot.ownerName)
-                runAsync { database.upsertSnapshot(snapshot) }
+                runAsync { upsertAndReport(snapshot) }
                 name?.let { createdName ->
                     runPlayer(snapshot.ownerUuid?.let { Bukkit.getPlayer(it) } ?: return@let, 20L) {
                         confirmCreated(createdName, rollbackIfMissing = false)
@@ -1115,13 +1208,13 @@ object BridgePlugin {
                 }
                 localDeleteTombstones.remove(snapshot.nameKey)
                 addCompletion(snapshot.name, snapshot.ownerUuid, snapshot.ownerName)
-                runAsync { database.replaceRenamed(oldName, snapshot) }
+                runAsync { database.replaceRenamed(oldName, snapshot)?.let { reportConflict(it) } }
             }
             "ResidenceOwnerChangeEvent" -> {
                 val snapshot = ResidenceHook.snapshotFromResidence(event.invokeNoArg("getResidence")) ?: return
                 localDeleteTombstones.remove(snapshot.nameKey)
                 addCompletion(snapshot.name, snapshot.ownerUuid, snapshot.ownerName)
-                runAsync { database.upsertSnapshot(snapshot) }
+                runAsync { upsertAndReport(snapshot) }
             }
         }
     }

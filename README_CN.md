@@ -145,7 +145,7 @@ mysql:
 
 ### 3. 代理端与消息频道
 
-Velocity 端只需要安装 `ResidenceBridge-Velocity-1.2.5.jar`，当前没有单独配置文件。子服端保持：
+Velocity 端只需要安装 `ResidenceBridge-Velocity-1.2.6.jar`，当前没有单独配置文件。子服端保持：
 
 ```yaml
 velocity:
@@ -256,7 +256,7 @@ cd Velocity
 
 ```text
 Server/build/libs/ResidenceBridge-1.2.5.jar
-Velocity/build/libs/ResidenceBridge-Velocity-1.2.5.jar
+Velocity/build/libs/ResidenceBridge-Velocity-1.2.6.jar
 ```
 
 GitHub Actions 会在推送 `main` 或 `v*` 标签时自动构建并上传两个 jar。
