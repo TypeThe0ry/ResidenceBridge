@@ -30,11 +30,24 @@ object ResidenceBridgeCommand {
     val sync = subCommand {
         execute<ProxyCommandSender> { sender, _, _ ->
             sender.sendMessage("ResidenceBridge sync started.")
-            BridgePlugin.syncNow { count, error ->
-                if (error == null) {
-                    sender.sendMessage("ResidenceBridge synced $count residences.")
-                } else {
-                    sender.sendMessage("ResidenceBridge sync failed: ${error.message}")
+            BridgePlugin.syncNow { outcome, error ->
+                if (error != null || outcome == null) {
+                    sender.sendMessage("ResidenceBridge sync failed: ${error?.message}")
+                    return@syncNow
+                }
+                sender.sendMessage("ResidenceBridge synced ${outcome.synced} residences.")
+                if (outcome.pruneSkipped) {
+                    sender.sendMessage("Warning: no residences were readable, so the existing index rows were kept.")
+                }
+                if (outcome.skipped > 0) {
+                    sender.sendMessage("Warning: ${outcome.skipped} residences were skipped (name longer than 128 characters).")
+                }
+                if (outcome.conflicts.isNotEmpty()) {
+                    sender.sendMessage("Warning: ${outcome.conflicts.size} duplicate name(s) are already registered by another server and were NOT indexed for this server:")
+                    outcome.conflicts.take(20).forEach {
+                        sender.sendMessage(" - ${it.displayName} (owned by server '${it.otherServerId}', ${it.status})")
+                    }
+                    if (outcome.conflicts.size > 20) sender.sendMessage(" ... and ${outcome.conflicts.size - 20} more")
                 }
             }
         }

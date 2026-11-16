@@ -80,4 +80,19 @@ data class CreateReservationResult(
     val reserved: Boolean = status == CreateReservationStatus.RESERVED
 }
 
+data class IndexConflict(
+    val nameKey: String,
+    val displayName: String,
+    val otherServerId: String,
+    val status: String
+)
+
+data class SyncOutcome(
+    val synced: Int,
+    val skipped: Int,
+    val pruned: Int,
+    val pruneSkipped: Boolean,
+    val conflicts: List<IndexConflict>
+)
+
 fun key(name: String): String = name.trim().lowercase(java.util.Locale.ROOT)

@@ -23,22 +23,33 @@ data class BridgeConfig(
     val messages: Messages
 ) {
     companion object {
+        const val DEFAULT_SERVER_ID = "survival-1"
+
+        internal fun validateServerId(raw: String?): String {
+            val id = raw.orEmpty().trim().lowercase(Locale.ROOT)
+            require(id.isNotEmpty()) { "server-id must not be empty." }
+            require(id.isValidProtocolToken()) {
+                "server-id '$id' is invalid: it must be at most 64 characters and contain no whitespace, control characters or '|'."
+            }
+            return id
+        }
+
         fun load(config: FileConfiguration): BridgeConfig {
             return BridgeConfig(
-                serverId = config.getString("server-id", "survival-1")!!.trim().lowercase(Locale.ROOT),
+                serverId = validateServerId(config.getString("server-id", DEFAULT_SERVER_ID)),
                 mysql = MysqlConfig(
                     host = config.getString("mysql.host", "127.0.0.1")!!,
                     port = config.getInt("mysql.port", 3306),
                     database = config.getString("mysql.database", "minecraft")!!,
                     username = config.getString("mysql.username", "root")!!,
                     password = config.getString("mysql.password", "password")!!,
-                    maximumPoolSize = config.getInt("mysql.maximum-pool-size", 10)
+                    maximumPoolSize = config.getInt("mysql.maximum-pool-size", 10).coerceAtLeast(2)
                 ),
-                syncInitialDelayTicks = config.getLong("sync.initial-delay-ticks", 40L),
-                syncIntervalSeconds = config.getLong("sync.interval-seconds", 60L),
+                syncInitialDelayTicks = config.getLong("sync.initial-delay-ticks", 40L).coerceAtLeast(1L),
+                syncIntervalSeconds = config.getLong("sync.interval-seconds", 60L).coerceIn(5L, 3600L),
                 syncLogSuccess = config.getBoolean("sync.log-success", false),
-                pendingExpireSeconds = config.getLong("teleport.pending-expire-seconds", 30L),
-                joinDelayTicks = config.getLong("teleport.join-delay-ticks", 0L),
+                pendingExpireSeconds = config.getLong("teleport.pending-expire-seconds", 30L).coerceAtLeast(5L),
+                joinDelayTicks = config.getLong("teleport.join-delay-ticks", 0L).coerceAtLeast(0L),
                 teleportWait = TeleportWaitConfig(
                     enabled = config.getBoolean("teleport.wait.enabled", true),
                     defaultSeconds = config.getInt("teleport.wait.default-seconds", 3),

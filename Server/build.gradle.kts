@@ -41,7 +41,17 @@ dependencies {
     compileOnly("com.zaxxer:HikariCP:4.0.3")
     compileOnly("me.clip:placeholderapi:2.11.6")
     testImplementation(kotlin("test-junit"))
+    testImplementation("com.zaxxer:HikariCP:4.0.3")
+    testImplementation("com.mysql:mysql-connector-j:8.0.33")
+    testImplementation("org.slf4j:slf4j-nop:1.7.36")
     //implementation("com.mysql:mysql-connector-j:8.0.33")
+}
+
+tasks.test {
+    // The MySQL integration test is skipped unless RB_TEST_MYSQL_* is set (see BridgeDatabaseIntegrationTest).
+    listOf("RB_TEST_MYSQL_HOST", "RB_TEST_MYSQL_PORT", "RB_TEST_MYSQL_USER", "RB_TEST_MYSQL_PASSWORD", "RB_TEST_MYSQL_DB", "RB_TEST_MYSQL_DB_OTHER").forEach { name ->
+        System.getenv(name)?.let { environment(name, it) }
+    }
 }
 
 tasks.withType<JavaCompile> {

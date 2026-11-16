@@ -5,6 +5,8 @@ import com.zaxxer.hikari.HikariConfig
 import com.zaxxer.hikari.HikariDataSource
 import java.sql.Connection
 import java.sql.ResultSet
+import java.sql.SQLException
+import java.sql.SQLIntegrityConstraintViolationException
 import java.sql.Statement
 import java.util.UUID
 import kotlin.math.max
@@ -13,16 +15,32 @@ class BridgeDatabase(private val config: BridgeConfig) {
 
     private companion object {
         private const val ACTIVE_PRUNE_GRACE_MILLIS = 5 * 60 * 1000L
+        private const val MAX_NAME_LENGTH = 128
+
+        // A row owned by another server (ACTIVE or RESERVED) is never overwritten: names are globally unique.
+        private fun guarded(column: String) = "$column=IF(server_id<>VALUES(server_id), $column, VALUES($column))"
+
+        private val UPSERT_SQL = """
+            INSERT INTO residence_bridge_index
+              (name_key, display_name, server_id, world, tp_world, tp_x, tp_y, tp_z, tp_yaw, tp_pitch, owner_uuid, owner_name, status, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?)
+            ON DUPLICATE KEY UPDATE
+              ${listOf("display_name", "world", "tp_world", "tp_x", "tp_y", "tp_z", "tp_yaw", "tp_pitch", "owner_uuid", "owner_name").joinToString(",\n              ") { guarded(it) }},
+              status=IF(server_id<>VALUES(server_id), status, 'ACTIVE'),
+              updated_at=IF(server_id<>VALUES(server_id), updated_at, VALUES(updated_at)),
+              server_id=IF(server_id<>VALUES(server_id), server_id, VALUES(server_id))
+            """.trimIndent()
     }
 
     private val dataSource: HikariDataSource
 
     init {
         val hikari = HikariConfig()
-        hikari.jdbcUrl = "jdbc:mysql://${config.mysql.host}:${config.mysql.port}/${config.mysql.database}?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=UTC"
+        hikari.jdbcUrl = "jdbc:mysql://${config.mysql.host}:${config.mysql.port}/${config.mysql.database}?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=UTC&connectTimeout=10000&socketTimeout=30000"
         hikari.username = config.mysql.username
         hikari.password = config.mysql.password
         hikari.maximumPoolSize = config.mysql.maximumPoolSize
+        hikari.connectionTimeout = 10_000L
         hikari.poolName = "ResidenceBridge"
         hikari.driverClassName = "com.mysql.cj.jdbc.Driver"
         dataSource = HikariDataSource(hikari)
@@ -100,20 +118,32 @@ class BridgeDatabase(private val config: BridgeConfig) {
     fun reserveName(name: String): Boolean = reserveName(name, config.serverId, null, null)
 
     fun reserveName(name: String, serverId: String, ownerUuid: UUID?, ownerName: String?): Boolean = connection().use { conn ->
-        conn.prepareStatement(
-            """
-            INSERT IGNORE INTO residence_bridge_index
-            (name_key, display_name, server_id, world, owner_uuid, owner_name, status, updated_at)
-            VALUES (?, ?, ?, NULL, ?, ?, 'RESERVED', ?)
-            """.trimIndent()
-        ).use { ps ->
-            ps.setString(1, key(name))
-            ps.setString(2, name)
-            ps.setString(3, serverId)
-            ps.setString(4, ownerUuid?.toString())
-            ps.setString(5, ownerName)
-            ps.setLong(6, System.currentTimeMillis())
-            ps.executeUpdate() == 1
+        deleteStaleReservations(conn)
+        insertReservation(conn, name, serverId, ownerUuid, ownerName)
+    }
+
+    /** Returns false (instead of throwing) when the name is already taken. INSERT IGNORE is avoided on purpose: it also hides truncation errors. */
+    private fun insertReservation(conn: Connection, name: String, serverId: String, ownerUuid: UUID?, ownerName: String?): Boolean {
+        return try {
+            conn.prepareStatement(
+                """
+                INSERT INTO residence_bridge_index
+                (name_key, display_name, server_id, world, owner_uuid, owner_name, status, updated_at)
+                VALUES (?, ?, ?, NULL, ?, ?, 'RESERVED', ?)
+                """.trimIndent()
+            ).use { ps ->
+                ps.setString(1, key(name))
+                ps.setString(2, name)
+                ps.setString(3, serverId)
+                ps.setString(4, ownerUuid?.toString())
+                ps.setString(5, ownerName?.take(32))
+                ps.setLong(6, System.currentTimeMillis())
+                ps.executeUpdate() == 1
+            }
+        } catch (e: SQLIntegrityConstraintViolationException) {
+            false
+        } catch (e: SQLException) {
+            if (e.errorCode == 1062 || e.sqlState == "23000") false else throw e
         }
     }
 
@@ -144,21 +174,7 @@ class BridgeDatabase(private val config: BridgeConfig) {
                 conn.commit()
                 return@use CreateReservationResult(CreateReservationStatus.LIMIT_REACHED, currentCount, maxResidences)
             }
-            val reserved = conn.prepareStatement(
-                """
-                INSERT IGNORE INTO residence_bridge_index
-                (name_key, display_name, server_id, world, owner_uuid, owner_name, status, updated_at)
-                VALUES (?, ?, ?, NULL, ?, ?, 'RESERVED', ?)
-                """.trimIndent()
-            ).use { ps ->
-                ps.setString(1, key(name))
-                ps.setString(2, name)
-                ps.setString(3, config.serverId)
-                ps.setString(4, ownerUuid.toString())
-                ps.setString(5, ownerName)
-                ps.setLong(6, System.currentTimeMillis())
-                ps.executeUpdate() == 1
-            }
+            val reserved = insertReservation(conn, name, config.serverId, ownerUuid, ownerName)
             conn.commit()
             if (reserved) {
                 CreateReservationResult(CreateReservationStatus.RESERVED, currentCount + 1, maxResidences)
@@ -173,8 +189,10 @@ class BridgeDatabase(private val config: BridgeConfig) {
         }
     }
 
-    fun upsertSnapshot(snapshot: ResidenceSnapshot) = connection().use { conn ->
-        upsertSnapshot(conn, snapshot)
+    /** Upserts one local snapshot. Returns the conflicting entry when another server already owns this name. */
+    fun upsertSnapshot(snapshot: ResidenceSnapshot): IndexConflict? = connection().use { conn ->
+        upsertSnapshots(conn, listOf(snapshot))
+        findConflicts(conn, listOf(snapshot)).firstOrNull()
     }
 
     fun deleteReservationIfLocal(name: String) = connection().use { conn ->
@@ -335,17 +353,20 @@ class BridgeDatabase(private val config: BridgeConfig) {
         }
     }
 
-    fun replaceRenamed(oldName: String, newSnapshot: ResidenceSnapshot) = connection().use { conn ->
+    fun replaceRenamed(oldName: String, newSnapshot: ResidenceSnapshot): IndexConflict? = connection().use { conn ->
         conn.autoCommit = false
         try {
             if (key(oldName) != newSnapshot.nameKey) {
-                conn.prepareStatement("DELETE FROM residence_bridge_index WHERE name_key=?").use { ps ->
+                conn.prepareStatement("DELETE FROM residence_bridge_index WHERE name_key=? AND server_id=?").use { ps ->
                     ps.setString(1, key(oldName))
+                    ps.setString(2, config.serverId)
                     ps.executeUpdate()
                 }
             }
-            upsertSnapshot(conn, newSnapshot)
+            upsertSnapshots(conn, listOf(newSnapshot))
+            val conflict = findConflicts(conn, listOf(newSnapshot)).firstOrNull()
             conn.commit()
+            conflict
         } catch (t: Throwable) {
             conn.rollback()
             throw t
@@ -354,28 +375,32 @@ class BridgeDatabase(private val config: BridgeConfig) {
         }
     }
 
-    fun syncServerSnapshots(snapshots: List<ResidenceSnapshot>) = connection().use { conn ->
+    /**
+     * Writes this server's snapshots and (optionally) prunes rows that disappeared.
+     * An empty snapshot list never prunes: it almost always means Residence was not readable,
+     * and deleting the whole index would let other servers claim every name.
+     */
+    fun syncServerSnapshots(snapshots: List<ResidenceSnapshot>): SyncOutcome = connection().use { conn ->
         conn.autoCommit = false
         try {
-            val pruneBefore = System.currentTimeMillis() - ACTIVE_PRUNE_GRACE_MILLIS
-            snapshots.forEach { upsertSnapshot(conn, it) }
-            purgeExpiredPending(conn, System.currentTimeMillis())
-            if (snapshots.isEmpty()) {
-                conn.prepareStatement("DELETE FROM residence_bridge_index WHERE server_id=? AND status='ACTIVE' AND updated_at<?").use { ps ->
+            val now = System.currentTimeMillis()
+            val valid = snapshots.filter { it.nameKey.length <= MAX_NAME_LENGTH && it.name.length <= MAX_NAME_LENGTH }
+            val skipped = snapshots.size - valid.size
+            deleteStaleReservations(conn)
+            upsertSnapshots(conn, valid)
+            purgeExpiredPending(conn, now)
+            val conflicts = findConflicts(conn, valid)
+            var pruned = 0
+            val pruneSkipped = valid.isEmpty()
+            if (!pruneSkipped) {
+                pruned = conn.prepareStatement("DELETE FROM residence_bridge_index WHERE server_id=? AND status='ACTIVE' AND updated_at<?").use { ps ->
                     ps.setString(1, config.serverId)
-                    ps.setLong(2, pruneBefore)
-                    ps.executeUpdate()
-                }
-            } else {
-                val marks = snapshots.joinToString(",") { "?" }
-                conn.prepareStatement("DELETE FROM residence_bridge_index WHERE server_id=? AND status='ACTIVE' AND updated_at<? AND name_key NOT IN ($marks)").use { ps ->
-                    ps.setString(1, config.serverId)
-                    ps.setLong(2, pruneBefore)
-                    snapshots.forEachIndexed { index, snapshot -> ps.setString(index + 3, snapshot.nameKey) }
+                    ps.setLong(2, now - ACTIVE_PRUNE_GRACE_MILLIS)
                     ps.executeUpdate()
                 }
             }
             conn.commit()
+            SyncOutcome(valid.size, skipped, pruned, pruneSkipped, conflicts)
         } catch (t: Throwable) {
             conn.rollback()
             throw t
@@ -543,52 +568,60 @@ class BridgeDatabase(private val config: BridgeConfig) {
         }
     }
 
-    private fun upsertSnapshot(conn: Connection, snapshot: ResidenceSnapshot) {
-        conn.prepareStatement(
-            """
-            INSERT INTO residence_bridge_index
-              (name_key, display_name, server_id, world, tp_world, tp_x, tp_y, tp_z, tp_yaw, tp_pitch, owner_uuid, owner_name, status, updated_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?)
-            ON DUPLICATE KEY UPDATE
-                            display_name=IF(status='ACTIVE' AND server_id<>VALUES(server_id), display_name, VALUES(display_name)),
-                            server_id=IF(status='ACTIVE' AND server_id<>VALUES(server_id), server_id, VALUES(server_id)),
-                            world=IF(status='ACTIVE' AND server_id<>VALUES(server_id), world, VALUES(world)),
-                            tp_world=IF(status='ACTIVE' AND server_id<>VALUES(server_id), tp_world, VALUES(tp_world)),
-                            tp_x=IF(status='ACTIVE' AND server_id<>VALUES(server_id), tp_x, VALUES(tp_x)),
-                            tp_y=IF(status='ACTIVE' AND server_id<>VALUES(server_id), tp_y, VALUES(tp_y)),
-                            tp_z=IF(status='ACTIVE' AND server_id<>VALUES(server_id), tp_z, VALUES(tp_z)),
-                            tp_yaw=IF(status='ACTIVE' AND server_id<>VALUES(server_id), tp_yaw, VALUES(tp_yaw)),
-                            tp_pitch=IF(status='ACTIVE' AND server_id<>VALUES(server_id), tp_pitch, VALUES(tp_pitch)),
-                            owner_uuid=IF(status='ACTIVE' AND server_id<>VALUES(server_id), owner_uuid, VALUES(owner_uuid)),
-                            owner_name=IF(status='ACTIVE' AND server_id<>VALUES(server_id), owner_name, VALUES(owner_name)),
-                            status=IF(status='ACTIVE' AND server_id<>VALUES(server_id), status, 'ACTIVE'),
-                            updated_at=IF(status='ACTIVE' AND server_id<>VALUES(server_id), updated_at, VALUES(updated_at))
-            """.trimIndent()
-        ).use { ps ->
-            ps.setString(1, snapshot.nameKey)
-            ps.setString(2, snapshot.name)
-            ps.setString(3, config.serverId)
-            ps.setString(4, snapshot.worldName)
-            val teleport = snapshot.teleportLocation
-            ps.setString(5, teleport?.worldName)
-            if (teleport == null) {
-                ps.setNull(6, java.sql.Types.DOUBLE)
-                ps.setNull(7, java.sql.Types.DOUBLE)
-                ps.setNull(8, java.sql.Types.DOUBLE)
-                ps.setNull(9, java.sql.Types.FLOAT)
-                ps.setNull(10, java.sql.Types.FLOAT)
-            } else {
-                ps.setDouble(6, teleport.x)
-                ps.setDouble(7, teleport.y)
-                ps.setDouble(8, teleport.z)
-                ps.setFloat(9, teleport.yaw)
-                ps.setFloat(10, teleport.pitch)
+    private fun upsertSnapshots(conn: Connection, snapshots: List<ResidenceSnapshot>) {
+        if (snapshots.isEmpty()) return
+        val now = System.currentTimeMillis()
+        conn.prepareStatement(UPSERT_SQL).use { ps ->
+            var queued = 0
+            snapshots.forEach { snapshot ->
+                ps.setString(1, snapshot.nameKey)
+                ps.setString(2, snapshot.name)
+                ps.setString(3, config.serverId)
+                ps.setString(4, snapshot.worldName?.take(64))
+                val teleport = snapshot.teleportLocation
+                ps.setString(5, teleport?.worldName?.take(64))
+                if (teleport == null) {
+                    ps.setNull(6, java.sql.Types.DOUBLE)
+                    ps.setNull(7, java.sql.Types.DOUBLE)
+                    ps.setNull(8, java.sql.Types.DOUBLE)
+                    ps.setNull(9, java.sql.Types.FLOAT)
+                    ps.setNull(10, java.sql.Types.FLOAT)
+                } else {
+                    ps.setDouble(6, teleport.x)
+                    ps.setDouble(7, teleport.y)
+                    ps.setDouble(8, teleport.z)
+                    ps.setFloat(9, teleport.yaw)
+                    ps.setFloat(10, teleport.pitch)
+                }
+                ps.setString(11, snapshot.ownerUuid?.toString())
+                ps.setString(12, snapshot.ownerName?.take(32))
+                ps.setLong(13, now)
+                ps.addBatch()
+                if (++queued % 500 == 0) ps.executeBatch()
             }
-            ps.setString(11, snapshot.ownerUuid?.toString())
-            ps.setString(12, snapshot.ownerName)
-            ps.setLong(13, System.currentTimeMillis())
-            ps.executeUpdate()
+            ps.executeBatch()
         }
+    }
+
+    /**
+     * Finds snapshots whose name is currently claimed by a different server. Checked with an explicit SELECT
+     * because the affected-row count of INSERT .. ON DUPLICATE KEY UPDATE is ambiguous with Connector/J's found-rows default.
+     */
+    private fun findConflicts(conn: Connection, snapshots: List<ResidenceSnapshot>): List<IndexConflict> {
+        val result = mutableListOf<IndexConflict>()
+        snapshots.map { it.nameKey }.distinct().chunked(400).forEach { chunk ->
+            val marks = chunk.joinToString(",") { "?" }
+            conn.prepareStatement("SELECT name_key, display_name, server_id, status FROM residence_bridge_index WHERE server_id<>? AND name_key IN ($marks)").use { ps ->
+                ps.setString(1, config.serverId)
+                chunk.forEachIndexed { index, nameKey -> ps.setString(index + 2, nameKey) }
+                ps.executeQuery().use { rs ->
+                    while (rs.next()) {
+                        result += IndexConflict(rs.getString("name_key"), rs.getString("display_name"), rs.getString("server_id"), rs.getString("status"))
+                    }
+                }
+            }
+        }
+        return result
     }
 
     private fun countByOwner(conn: Connection, ownerUuid: UUID, ownerName: String, includeReserved: Boolean): Int {
@@ -614,14 +647,14 @@ class BridgeDatabase(private val config: BridgeConfig) {
     }
 
     private fun ensureColumn(conn: Connection, table: String, column: String, definition: String) {
-        val exists = conn.metaData.getColumns(null, null, table, column).use { it.next() }
+        val exists = conn.metaData.getColumns(conn.catalog, null, table, column).use { it.next() }
         if (!exists) {
             conn.createStatement().use { it.executeUpdate("ALTER TABLE $table ADD COLUMN $column $definition") }
         }
     }
 
     private fun ensureIndex(conn: Connection, table: String, index: String, columns: String) {
-        val exists = conn.metaData.getIndexInfo(null, null, table, false, false).use { rs ->
+        val exists = conn.metaData.getIndexInfo(conn.catalog, null, table, false, false).use { rs ->
             var found = false
             while (rs.next()) {
                 if (index.equals(rs.getString("INDEX_NAME"), ignoreCase = true)) {

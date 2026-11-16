@@ -47,3 +47,13 @@
 - Java 版本
 - 复现步骤
 - 日志片段
+
+## Database integration tests
+
+`BridgeDatabaseIntegrationTest` runs against a real MySQL/MariaDB and is skipped unless `RB_TEST_MYSQL_HOST` is set
+(also `RB_TEST_MYSQL_PORT`, `_USER`, `_PASSWORD`, `_DB` and `_DB_OTHER`; the two databases must already exist and are wiped by the test).
+
+```bash
+cd Server
+RB_TEST_MYSQL_HOST=127.0.0.1 RB_TEST_MYSQL_USER=rb RB_TEST_MYSQL_PASSWORD=rbpass RB_TEST_MYSQL_DB=rbtest RB_TEST_MYSQL_DB_OTHER=rbother ./gradlew test
+```
